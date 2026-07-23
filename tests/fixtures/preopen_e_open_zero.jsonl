@@ -1,0 +1,2 @@
+{"code":"9005","name":"情境E開盤零值","ts":"2026-07-24T08:59:50","kind":"bidask","simtrade":true,"price":null,"chg_type":null,"bid_price":[100.0,null,null,null,null],"bid_volume":[5000,0,0,0,0],"ask_price":[null,null,null,null,null],"ask_volume":[0,0,0,0,0],"volume":null}
+{"code":"9005","name":"情境E開盤零值","ts":"2026-07-24T09:00:03","kind":"snapshot","simtrade":false,"open_price":0.0,"bid_price":[100.0,null,null,null,null],"bid_volume":[5000,0,0,0,0],"ask_price":[null,null,null,null,null],"ask_volume":[0,0,0,0,0]}

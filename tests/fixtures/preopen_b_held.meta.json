@@ -1,0 +1,22 @@
+{
+  "date": "2026-07-24",
+  "session": "preopen",
+  "window": {
+    "start": "2026-07-24T08:30:00",
+    "end": "2026-07-24T09:00:00"
+  },
+  "universe_size": 1,
+  "subscribed": 1,
+  "sub_limit": 1,
+  "subscribed_codes": [
+    "9002"
+  ],
+  "stocks": [
+    {
+      "code": "9002",
+      "name": "合成B守住",
+      "reference": 109.0,
+      "limit_up": 120.0
+    }
+  ]
+}

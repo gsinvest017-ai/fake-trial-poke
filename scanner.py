@@ -25,6 +25,7 @@ TAIPEI = ZoneInfo("Asia/Taipei")
 DEFAULT_BID0_REMAIN_RATIO = 0.30
 DEFAULT_DROP_LOOKBACK_SECONDS = 30 * 60
 SNAPSHOT_LIMIT_TOLERANCE_RATIO = 0.001
+OPEN_GAP_TOLERANCE_PCT = 0.0001
 
 TOP_LEVEL_FIELDS = {
     "date",
@@ -79,6 +80,11 @@ def to_float(value: Any) -> float | None:
     except (TypeError, ValueError):
         return None
     return number if math.isfinite(number) else None
+
+
+def to_positive_float(value: Any) -> float | None:
+    number = to_float(value)
+    return number if number is not None and number > 0 else None
 
 
 def to_int(value: Any) -> int | None:
@@ -184,6 +190,25 @@ def default_window(date_text: str, session: str) -> dict[str, str]:
     return {"start": f"{date_text}T08:30:00", "end": f"{date_text}T09:00:00"}
 
 
+def parse_window_endpoint(value: Any, session_date: datetime) -> datetime | None:
+    parsed = parse_ts(value)
+    if parsed is not None:
+        return parsed
+    text = str(value or "").strip()
+    for pattern in ("%H:%M", "%H:%M:%S"):
+        try:
+            clock = datetime.strptime(text, pattern).time()
+        except ValueError:
+            continue
+        return datetime.combine(session_date.date(), clock)
+    return None
+
+
+def session_open_at(session_date: datetime, session: str) -> datetime:
+    clock = time(13, 30) if session == "preclose" else time(9, 0)
+    return datetime.combine(session_date.date(), clock)
+
+
 def load_metadata(input_path: Path) -> dict[str, Any]:
     sidecar = input_path.with_suffix(".meta.json")
     if not sidecar.exists():
@@ -279,7 +304,7 @@ def load_snapshot_prices(input_path: Path) -> dict[str, float]:
     prices: dict[str, float] = {}
     if isinstance(payload, dict):
         for code, value in payload.items():
-            price = to_float(value)
+            price = to_positive_float(value)
             if price is not None:
                 prices[str(code)] = price
     elif isinstance(payload, list):
@@ -287,7 +312,7 @@ def load_snapshot_prices(input_path: Path) -> dict[str, float]:
             if not isinstance(item, dict):
                 continue
             code = str(item.get("code") or "").strip()
-            price = to_float(item.get("open_price", item.get("open")))
+            price = to_positive_float(item.get("open_price", item.get("open")))
             if code and price is not None:
                 prices[code] = price
     return prices
@@ -312,7 +337,7 @@ def infer_limit_up(
 ) -> float | None:
     explicit = to_float(first_known(stock_meta, events, "limit_up"))
     if explicit is not None:
-        return explicit
+        return explicit if explicit > 0 else None
     # chg_type==1 是行情源直接給出的漲停旗標，可安全用該筆試撮價
     # 還原 limit_up；沒有直接證據時維持 null，不用 10% 反推偽造。
     candidates = [
@@ -322,7 +347,10 @@ def infer_limit_up(
         and bool(event.get("simtrade"))
         and to_int(event.get("chg_type")) == 1
     ]
-    return next((price for price in candidates if price is not None), None)
+    return next(
+        (price for price in candidates if price is not None and price > 0),
+        None,
+    )
 
 
 def opening_tick_price(
@@ -348,11 +376,25 @@ def opening_tick_price(
 
 def latest_snapshot(
     events: list[dict[str, Any]],
+    not_before: datetime,
+    legacy_observed_at: datetime | None,
 ) -> dict[str, Any] | None:
-    snapshots = [
-        event for event in events if event.get("kind") == "snapshot"
-    ]
-    return max(snapshots, key=lambda event: event["_dt"], default=None)
+    snapshots: list[tuple[datetime, datetime, dict[str, Any]]] = []
+    for event in events:
+        if event.get("kind") != "snapshot":
+            continue
+        evidence_at = event["_dt"]
+        # 舊 recorder 把行情本身的 stale ts 寫成 snapshot ts；僅在 sidecar
+        # 明確證明整批 snapshot 於開盤後完成時，以 generated_at 相容舊檔。
+        if (
+            evidence_at < not_before
+            and legacy_observed_at is not None
+            and legacy_observed_at >= not_before
+        ):
+            evidence_at = legacy_observed_at
+        if evidence_at >= not_before:
+            snapshots.append((evidence_at, event["_dt"], event))
+    return max(snapshots, key=lambda item: (item[0], item[1]), default=(None, None, None))[2]
 
 
 def snapshot_limit_status(
@@ -410,8 +452,6 @@ def bid0_drop_evidence(
     snapshot_volume = max(0, raw_snapshot_volume)
     if preopen_final <= 0:
         return False
-    if snapshot_volume == 0:
-        return True
     absolute_drop = preopen_final - snapshot_volume
     remain_ratio = 1.0 - drop_ratio
     actual_remain_ratio = snapshot_volume / preopen_final
@@ -435,6 +475,10 @@ def stock_record(
     *,
     session: str,
     session_date: datetime,
+    window_start: datetime,
+    window_end: datetime,
+    opening_at: datetime,
+    legacy_snapshot_at: datetime | None,
     snapshot_prices: dict[str, float],
     open_source: str,
     open_grace_seconds: int,
@@ -447,7 +491,7 @@ def stock_record(
     name = str(first_known(stock_meta, events, "name") or code)
     reference = to_float(first_known(stock_meta, events, "reference"))
     limit_up = infer_limit_up(stock_meta, events)
-    snapshot = latest_snapshot(events)
+    snapshot = latest_snapshot(events, opening_at, legacy_snapshot_at)
 
     bidask_lock_times: list[datetime] = []
     tick_lock_times: list[datetime] = []
@@ -460,9 +504,13 @@ def stock_record(
 
     for event in events:
         simtrade = event.get("simtrade") is True
+        in_session_window = window_start <= event["_dt"] < window_end
+        preopen_simtrade = simtrade and in_session_window
         if event.get("kind") == "tick":
             price = to_float(event.get("price"))
-            chg_type_one = simtrade and to_int(event.get("chg_type")) == 1
+            chg_type_one = (
+                preopen_simtrade and to_int(event.get("chg_type")) == 1
+            )
             chg_type_hit_1 = chg_type_hit_1 or chg_type_one
             if price is not None:
                 sim_price_series.append(
@@ -472,9 +520,11 @@ def stock_record(
                         "simtrade": simtrade,
                     }
                 )
-                if simtrade:
+                if preopen_simtrade:
                     sim_prices.append(price)
-            if simtrade and (chg_type_one or same_price(price, limit_up)):
+            if preopen_simtrade and (
+                chg_type_one or same_price(price, limit_up)
+            ):
                 tick_lock_times.append(event["_dt"])
         elif event.get("kind") == "bidask":
             bid_price = to_float(first_item(event.get("bid_price")))
@@ -486,7 +536,7 @@ def stock_record(
                     "bid0_volume": bid_volume,
                 }
             )
-            if simtrade:
+            if preopen_simtrade:
                 has_simtrade_bidask = True
                 bid0_volumes.append(bid_volume)
                 if same_price(bid_price, limit_up):
@@ -516,7 +566,7 @@ def stock_record(
         if open_source == "auto" and snapshot is not None:
             # snapshot 記錄存在但 open_price=null 代表仍無開盤價，不倒退
             # 採用 tick，避免把不同時間來源混為同一份開盤證據。
-            open_price = to_float(snapshot.get("open_price"))
+            open_price = to_positive_float(snapshot.get("open_price"))
         elif open_source == "auto":
             open_price = opening_tick_price(
                 events, session_date, open_grace_seconds
@@ -525,7 +575,7 @@ def stock_record(
                 open_price = snapshot_prices.get(code)
         elif open_source == "snapshot":
             open_price = (
-                to_float(snapshot.get("open_price"))
+                to_positive_float(snapshot.get("open_price"))
                 if snapshot is not None
                 else snapshot_prices.get(code)
             )
@@ -533,6 +583,7 @@ def stock_record(
             open_price = opening_tick_price(
                 events, session_date, open_grace_seconds
             )
+        open_price = to_positive_float(open_price)
 
     open_gap_pct = (
         round((open_price / limit_up - 1.0) * 100.0, 4)
@@ -558,9 +609,11 @@ def stock_record(
         else None
     )
 
-    if locked_limit_up and (
-        (open_gap_pct is not None and open_gap_pct < -0.0001) or bid0_dropped
-    ):
+    gap_below_tolerance = (
+        open_gap_pct is not None
+        and open_gap_pct < -OPEN_GAP_TOLERANCE_PCT
+    )
+    if locked_limit_up and (gap_below_tolerance or bid0_dropped):
         status = "suspected_fake"
     elif locked_limit_up and open_gap_pct is not None:
         status = "locked_held"
@@ -622,6 +675,28 @@ def build_result(
     except ValueError as exc:
         raise ValueError("date 必須為 YYYY-MM-DD 或 YYYYMMDD") from exc
 
+    raw_window = metadata.get("window")
+    window = (
+        {
+            "start": str(raw_window.get("start")),
+            "end": str(raw_window.get("end")),
+        }
+        if isinstance(raw_window, dict)
+        and raw_window.get("start")
+        and raw_window.get("end")
+        else default_window(date_text, session)
+    )
+    window_start = parse_window_endpoint(window["start"], session_date)
+    window_end = parse_window_endpoint(window["end"], session_date)
+    if window_start is None or window_end is None:
+        raise ValueError("window start/end 必須為 ISO 時間或 HH:MM[:SS]")
+    if window_end <= window_start:
+        window_end += timedelta(days=1)
+    opening_at = session_open_at(session_date, session)
+    legacy_snapshot_at = None
+    if (to_int(metadata.get("snapshot_count")) or 0) > 0:
+        legacy_snapshot_at = parse_ts(metadata.get("generated_at"))
+
     event_groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for event in events:
         event_groups[event["code"]].append(event)
@@ -639,6 +714,10 @@ def build_result(
             event_groups.get(code, []),
             session=session,
             session_date=session_date,
+            window_start=window_start,
+            window_end=window_end,
+            opening_at=opening_at,
+            legacy_snapshot_at=legacy_snapshot_at,
             snapshot_prices=snapshot_prices,
             open_source=open_source,
             open_grace_seconds=open_grace_seconds,
@@ -664,17 +743,6 @@ def build_result(
         )
     )
 
-    raw_window = metadata.get("window")
-    window = (
-        {
-            "start": str(raw_window.get("start")),
-            "end": str(raw_window.get("end")),
-        }
-        if isinstance(raw_window, dict)
-        and raw_window.get("start")
-        and raw_window.get("end")
-        else default_window(date_text, session)
-    )
     subscribed_codes = {event["code"] for event in events}
     result = {
         "date": date_text,
@@ -1068,6 +1136,19 @@ def main(argv: list[str] | None = None) -> int:
         f"鎖漲停守住={counts['locked_held']}；"
         f"曾觸漲停={counts['touched']}；未觸及={counts['none']}"
     )
+    if args.open_source == "tick":
+        missing_tick_codes = [
+            stock["code"]
+            for stock in result["stocks"]
+            if stock["locked_limit_up"] and stock["open_price"] is None
+        ]
+        if missing_tick_codes:
+            print(
+                "scanner WARNING：--open-source tick 缺少開盤 tick，"
+                "以下標的保守維持 touched："
+                + ",".join(missing_tick_codes),
+                file=sys.stderr,
+            )
     if args.sample:
         print("資料性質=合成樣本（完全離線、未登入）")
     return 0

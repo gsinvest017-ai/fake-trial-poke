@@ -200,6 +200,11 @@ def to_float(value: Any) -> float | None:
     return float(number) if number is not None else None
 
 
+def to_positive_float(value: Any) -> float | None:
+    number = to_float(value)
+    return number if number is not None and number > 0 else None
+
+
 def to_int(value: Any) -> int | None:
     if value is None:
         return None
@@ -263,6 +268,13 @@ def make_schedule(
     if end_at <= start_at:
         end_at += timedelta(days=1)
     return start_at, end_at, session, source
+
+
+def capture_end_at(end_at: datetime, session: str) -> datetime:
+    """盤前多錄數秒，保留 09:00 後第一筆真實開盤 callback。"""
+    if session == "preopen":
+        return end_at + timedelta(seconds=SNAPSHOT_AFTER_OPEN_SECONDS)
+    return end_at
 
 
 def wait_until(target: datetime, label: str) -> None:
@@ -522,20 +534,23 @@ def snapshot_record(
     raw_time = getattr(snapshot, "ts", None)
     if raw_time is None:
         raw_time = getattr(snapshot, "datetime", None)
-    snapshot_time = event_datetime(raw_time)
-    if snapshot_time is None:
-        snapshot_time = observed_at
+    source_time = event_datetime(raw_time)
+    # snapshot 是否可作開盤證據取決於查詢時間，不是可能停留在盤前的
+    # 行情欄位 ts；保留 source_ts 供事後檢查行情新鮮度。
+    snapshot_time = observed_at
 
     code = normalize_code(getattr(snapshot, "code", "")) or fallback_code
     open_price = getattr(snapshot, "open_price", None)
     if open_price is None:
         open_price = getattr(snapshot, "open", None)
+    open_price = to_positive_float(open_price)
     return {
         "code": code,
         "name": name_by_code.get(code, ""),
         "ts": iso_local(snapshot_time),
+        "source_ts": iso_local(source_time),
         "kind": "snapshot",
-        "open_price": to_float(open_price),
+        "open_price": open_price,
         "bid_price": snapshot_levels(
             snapshot, "bid_price", "buy_price", to_float
         ),
@@ -922,15 +937,24 @@ def run_recorder(args: argparse.Namespace) -> int:
             wait_until(start_at, "等待 start 才開錄")
             recording.set()
             print(f"錄製開始={start_at.isoformat(timespec='seconds')}")
+            callback_end_at = capture_end_at(end_at, session)
             while True:
                 remaining = (
-                    end_at - datetime.now().replace(tzinfo=None)
+                    callback_end_at - datetime.now().replace(tzinfo=None)
                 ).total_seconds()
                 if remaining <= 0:
                     break
                 time.sleep(min(0.25, remaining))
             recording.clear()
-            print(f"錄製結束={end_at.isoformat(timespec='seconds')}")
+            print(
+                "錄製結束="
+                f"{callback_end_at.isoformat(timespec='seconds')}"
+                + (
+                    "（盤前窗口後延長 5 秒擷取開盤 callback）"
+                    if callback_end_at > end_at
+                    else ""
+                )
+            )
         else:
             # smoke 的計時從完成訂閱後起算，確保 callback 真正觀察滿 N 秒。
             recording.set()
