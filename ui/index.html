@@ -1,0 +1,1195 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>試撮異常即時偵測器</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --paper: #FAF8F3;
+      --surface: #FFFFFF;
+      --ink: #232019;
+      --muted: #706B61;
+      --line: #DED9CF;
+      --line-strong: #C9C2B6;
+      --fake: #C8322A;
+      --fake-soft: #FBE9E5;
+      --held: #B77514;
+      --held-soft: #F8EEDB;
+      --touched: #2F7D5B;
+      --touched-soft: #E4F1EA;
+      --watching: #817A70;
+      --watching-soft: #EFEBE4;
+      --shadow: 0 12px 32px rgba(55, 44, 25, 0.07);
+      --radius-xl: 24px;
+      --radius-lg: 18px;
+      --radius-md: 12px;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html {
+      min-width: 0;
+      background: var(--paper);
+    }
+
+    body {
+      min-width: 0;
+      margin: 0;
+      background:
+        radial-gradient(circle at 85% 0%, rgba(183, 117, 20, 0.08), transparent 27rem),
+        var(--paper);
+      color: var(--ink);
+      font-family: "PingFang TC", "Microsoft JhengHei", "Noto Sans TC",
+        ui-sans-serif, system-ui, -apple-system, sans-serif;
+      font-variant-numeric: tabular-nums;
+      line-height: 1.5;
+    }
+
+    button,
+    input,
+    table {
+      font: inherit;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .shell {
+      width: min(1540px, 100%);
+      min-width: 0;
+      margin: 0 auto;
+      padding: 24px clamp(14px, 2.4vw, 36px) 40px;
+    }
+
+    .masthead {
+      display: flex;
+      align-items: flex-end;
+      justify-content: space-between;
+      min-width: 0;
+      gap: 24px;
+      margin-bottom: 18px;
+    }
+
+    .eyebrow {
+      margin: 0 0 5px;
+      color: var(--held);
+      font-size: 0.72rem;
+      font-weight: 800;
+      letter-spacing: 0.16em;
+    }
+
+    h1,
+    h2,
+    p {
+      margin-top: 0;
+    }
+
+    h1 {
+      margin-bottom: 0;
+      font-family: Georgia, "Noto Serif TC", "PMingLiU", serif;
+      font-size: clamp(1.7rem, 3.2vw, 2.8rem);
+      font-weight: 700;
+      letter-spacing: -0.035em;
+      line-height: 1.1;
+    }
+
+    .clock-block {
+      flex: 0 0 auto;
+      text-align: right;
+    }
+
+    .clock-label {
+      margin-bottom: 2px;
+      color: var(--muted);
+      font-size: 0.72rem;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+    }
+
+    .clock {
+      font-family: Georgia, ui-serif, serif;
+      font-size: clamp(1.15rem, 2.3vw, 1.75rem);
+      line-height: 1.1;
+    }
+
+    .status-strip {
+      display: grid;
+      grid-template-columns: minmax(250px, 1.25fr) minmax(190px, 0.9fr)
+        repeat(4, minmax(105px, 0.55fr));
+      min-width: 0;
+      margin-bottom: 18px;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: var(--radius-xl);
+      background: rgba(255, 255, 255, 0.84);
+      box-shadow: var(--shadow);
+    }
+
+    .status-cell {
+      min-width: 0;
+      padding: 16px 18px;
+      border-right: 1px solid var(--line);
+    }
+
+    .status-cell:last-child {
+      border-right: 0;
+    }
+
+    .status-primary {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .service-dot {
+      width: 12px;
+      height: 12px;
+      flex: 0 0 auto;
+      border: 2px solid var(--surface);
+      border-radius: 999px;
+      background: var(--watching);
+      box-shadow: 0 0 0 2px var(--watching);
+    }
+
+    .service-dot.live {
+      background: var(--fake);
+      box-shadow: 0 0 0 2px var(--fake), 0 0 0 7px rgba(200, 50, 42, 0.1);
+      animation: breathe 1.8s ease-in-out infinite;
+    }
+
+    .service-dot.armed {
+      background: var(--held);
+      box-shadow: 0 0 0 2px var(--held);
+    }
+
+    .service-dot.replay {
+      background: var(--touched);
+      box-shadow: 0 0 0 2px var(--touched);
+    }
+
+    @keyframes breathe {
+      50% {
+        box-shadow: 0 0 0 2px var(--fake), 0 0 0 11px rgba(200, 50, 42, 0);
+      }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      *,
+      *::before,
+      *::after {
+        scroll-behavior: auto !important;
+        animation-duration: 0.001ms !important;
+        animation-iteration-count: 1 !important;
+      }
+    }
+
+    .cell-label {
+      margin-bottom: 3px;
+      color: var(--muted);
+      font-size: 0.68rem;
+      font-weight: 750;
+      letter-spacing: 0.06em;
+      white-space: nowrap;
+    }
+
+    .cell-value {
+      min-width: 0;
+      overflow: hidden;
+      color: var(--ink);
+      font-size: 1.02rem;
+      font-weight: 800;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .count-value {
+      font-family: Georgia, ui-serif, serif;
+      font-size: 1.45rem;
+      line-height: 1.05;
+    }
+
+    .count-fake .count-value {
+      color: var(--fake);
+    }
+
+    .count-held .count-value {
+      color: var(--held);
+    }
+
+    .count-touched .count-value {
+      color: var(--touched);
+    }
+
+    .count-watching .count-value {
+      color: var(--watching);
+    }
+
+    .content-layout {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(290px, 360px);
+      align-items: start;
+      min-width: 0;
+      gap: 18px;
+    }
+
+    .panel {
+      min-width: 0;
+      border: 1px solid var(--line);
+      border-radius: var(--radius-xl);
+      background: rgba(255, 255, 255, 0.9);
+      box-shadow: var(--shadow);
+    }
+
+    .panel-header {
+      display: flex;
+      align-items: flex-end;
+      justify-content: space-between;
+      min-width: 0;
+      gap: 16px;
+      padding: 19px 22px 16px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .panel-title {
+      margin: 0;
+      font-family: Georgia, "Noto Serif TC", "PMingLiU", serif;
+      font-size: 1.25rem;
+      letter-spacing: -0.02em;
+    }
+
+    .panel-meta {
+      margin: 0;
+      color: var(--muted);
+      font-size: 0.76rem;
+      text-align: right;
+    }
+
+    .stock-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      min-width: 0;
+      gap: 12px;
+      padding: 14px;
+    }
+
+    .stock-card {
+      position: relative;
+      min-width: 0;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: var(--radius-lg);
+      background: var(--surface);
+      transition: border-color 160ms ease, box-shadow 160ms ease;
+    }
+
+    .stock-card::before {
+      position: absolute;
+      inset: 0 auto 0 0;
+      width: 4px;
+      background: var(--watching);
+      content: "";
+    }
+
+    .stock-card.suspected_fake::before {
+      background: var(--fake);
+    }
+
+    .stock-card.locked_held::before {
+      background: var(--held);
+    }
+
+    .stock-card.touched::before {
+      background: var(--touched);
+    }
+
+    .stock-card-head {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      min-width: 0;
+      gap: 12px;
+      padding: 16px 16px 11px 19px;
+    }
+
+    .stock-id {
+      min-width: 0;
+    }
+
+    .stock-code {
+      display: inline-block;
+      margin-right: 6px;
+      color: var(--muted);
+      font-family: Georgia, ui-serif, serif;
+      font-size: 0.88rem;
+      font-weight: 700;
+    }
+
+    .stock-name {
+      display: inline;
+      overflow-wrap: anywhere;
+      font-size: 1.02rem;
+      font-weight: 850;
+    }
+
+    .status-badge {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      flex: 0 0 auto;
+      min-height: 28px;
+      padding: 4px 9px;
+      border: 1px solid var(--line-strong);
+      border-radius: 999px;
+      background: var(--watching-soft);
+      color: #5F594F;
+      font-size: 0.72rem;
+      font-weight: 850;
+      white-space: nowrap;
+    }
+
+    .status-badge.suspected_fake {
+      border-color: rgba(200, 50, 42, 0.28);
+      background: var(--fake-soft);
+      color: var(--fake);
+    }
+
+    .status-badge.locked_held {
+      border-color: rgba(183, 117, 20, 0.3);
+      background: var(--held-soft);
+      color: #936012;
+    }
+
+    .status-badge.touched {
+      border-color: rgba(47, 125, 91, 0.3);
+      background: var(--touched-soft);
+      color: var(--touched);
+    }
+
+    .stock-body {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      min-width: 0;
+      border-top: 1px solid var(--line);
+    }
+
+    .metric {
+      min-width: 0;
+      padding: 11px 12px;
+      border-right: 1px solid var(--line);
+    }
+
+    .metric:last-child {
+      border-right: 0;
+    }
+
+    .metric-label {
+      margin-bottom: 2px;
+      color: var(--muted);
+      font-size: 0.65rem;
+      font-weight: 750;
+      letter-spacing: 0.03em;
+      white-space: nowrap;
+    }
+
+    .metric-value {
+      min-width: 0;
+      overflow: hidden;
+      font-size: 0.91rem;
+      font-weight: 800;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .spark-wrap {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      align-items: end;
+      min-width: 0;
+      gap: 12px;
+      padding: 11px 14px 13px 19px;
+      border-top: 1px solid var(--line);
+      background: #FEFDFB;
+    }
+
+    .spark-block {
+      min-width: 0;
+    }
+
+    .spark-label {
+      margin-bottom: 4px;
+      color: var(--muted);
+      font-size: 0.64rem;
+      font-weight: 750;
+      letter-spacing: 0.04em;
+    }
+
+    .sparkline {
+      display: block;
+      width: 100%;
+      height: 43px;
+    }
+
+    .lock-meta {
+      color: var(--muted);
+      font-size: 0.69rem;
+      line-height: 1.35;
+      text-align: right;
+      white-space: nowrap;
+    }
+
+    .empty-state {
+      padding: 58px 24px;
+      color: var(--muted);
+      text-align: center;
+    }
+
+    .empty-icon {
+      display: block;
+      margin-bottom: 8px;
+      color: var(--line-strong);
+      font-family: Georgia, ui-serif, serif;
+      font-size: 2rem;
+    }
+
+    .alerts-panel {
+      position: sticky;
+      top: 14px;
+      overflow: hidden;
+    }
+
+    .alert-list {
+      max-height: min(680px, calc(100vh - 160px));
+      min-height: 210px;
+      overflow-y: auto;
+      overscroll-behavior: contain;
+      padding: 8px 12px 14px;
+      scrollbar-color: var(--line-strong) transparent;
+      scrollbar-width: thin;
+    }
+
+    .alert-item {
+      position: relative;
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr);
+      gap: 10px;
+      padding: 13px 4px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .alert-item:last-child {
+      border-bottom: 0;
+    }
+
+    .alert-item.is-new {
+      border-radius: var(--radius-md);
+      animation: alert-arrive 1.8s ease-out;
+    }
+
+    @keyframes alert-arrive {
+      0% {
+        background: rgba(183, 117, 20, 0.2);
+        transform: translateY(-4px);
+      }
+      100% {
+        background: transparent;
+        transform: translateY(0);
+      }
+    }
+
+    .alert-icon {
+      display: grid;
+      width: 27px;
+      height: 27px;
+      place-items: center;
+      border-radius: 8px;
+      background: var(--held-soft);
+      color: var(--held);
+      font-size: 0.78rem;
+      font-weight: 900;
+    }
+
+    .alert-item.suspected_fake .alert-icon {
+      background: var(--fake-soft);
+      color: var(--fake);
+    }
+
+    .alert-content {
+      min-width: 0;
+    }
+
+    .alert-topline {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      min-width: 0;
+      gap: 8px;
+      margin-bottom: 2px;
+    }
+
+    .alert-stock {
+      min-width: 0;
+      overflow: hidden;
+      font-size: 0.82rem;
+      font-weight: 850;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .alert-time {
+      flex: 0 0 auto;
+      color: var(--muted);
+      font-size: 0.67rem;
+    }
+
+    .alert-message {
+      margin: 0;
+      color: #555048;
+      font-size: 0.76rem;
+      overflow-wrap: anywhere;
+    }
+
+    .connection-note {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .connection-note::before {
+      width: 6px;
+      height: 6px;
+      border-radius: 999px;
+      background: var(--touched);
+      content: "";
+    }
+
+    .connection-note.offline::before {
+      background: var(--fake);
+    }
+
+    @media (max-width: 1160px) {
+      .status-strip {
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+      }
+
+      .status-primary,
+      .next-window {
+        grid-column: span 2;
+      }
+
+      .status-cell:nth-child(2),
+      .status-cell:nth-child(6) {
+        border-right: 0;
+      }
+
+      .status-cell:nth-child(-n + 2) {
+        border-bottom: 1px solid var(--line);
+      }
+
+      .stock-grid {
+        grid-template-columns: minmax(0, 1fr);
+      }
+    }
+
+    @media (max-width: 860px) {
+      .content-layout {
+        grid-template-columns: minmax(0, 1fr);
+      }
+
+      .alerts-panel {
+        position: static;
+      }
+
+      .alert-list {
+        max-height: 420px;
+      }
+    }
+
+    @media (max-width: 610px) {
+      .shell {
+        padding-top: 18px;
+      }
+
+      .masthead {
+        align-items: flex-start;
+        gap: 10px;
+      }
+
+      .clock-label {
+        display: none;
+      }
+
+      .status-strip {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        border-radius: var(--radius-lg);
+      }
+
+      .status-primary,
+      .next-window {
+        grid-column: span 2;
+      }
+
+      .status-cell {
+        padding: 13px 14px;
+      }
+
+      .status-cell:nth-child(4) {
+        border-right: 0;
+      }
+
+      .status-cell:nth-child(3),
+      .status-cell:nth-child(4) {
+        border-bottom: 1px solid var(--line);
+      }
+
+      .panel {
+        border-radius: var(--radius-lg);
+      }
+
+      .panel-header {
+        align-items: flex-start;
+        padding: 16px;
+      }
+
+      .stock-grid {
+        padding: 9px;
+      }
+
+      .stock-card-head {
+        flex-direction: column;
+        gap: 8px;
+      }
+
+      .stock-body {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+      }
+
+      .metric {
+        padding-inline: 8px;
+      }
+
+      .metric-label {
+        font-size: 0.6rem;
+      }
+    }
+
+    @media (max-width: 390px) {
+      .masthead {
+        display: block;
+      }
+
+      .clock-block {
+        margin-top: 8px;
+        text-align: left;
+      }
+
+      .clock {
+        font-family: inherit;
+        font-size: 0.82rem;
+        color: var(--muted);
+      }
+
+      .spark-wrap {
+        grid-template-columns: minmax(0, 1fr);
+      }
+
+      .lock-meta {
+        text-align: left;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <header class="masthead">
+      <div>
+        <p class="eyebrow">LIVE AUCTION DETECTOR</p>
+        <h1>試撮異常即時偵測器</h1>
+      </div>
+      <div class="clock-block" aria-label="目前台北時間">
+        <div class="clock-label">台北時間</div>
+        <div class="clock" id="clock">--:--:--</div>
+      </div>
+    </header>
+
+    <section class="status-strip" aria-label="服務與偵測統計">
+      <div class="status-cell status-primary">
+        <span class="service-dot" id="service-dot" aria-hidden="true"></span>
+        <div>
+          <div class="cell-label">服務狀態</div>
+          <div class="cell-value" id="service-status">讀取中</div>
+        </div>
+      </div>
+      <div class="status-cell next-window">
+        <div class="cell-label" id="window-label">下次偵測窗口</div>
+        <div class="cell-value" id="next-window">--</div>
+      </div>
+      <div class="status-cell count-fake">
+        <div class="cell-label">疑似假試撮</div>
+        <div class="cell-value count-value" id="count-fake">0</div>
+      </div>
+      <div class="status-cell count-held">
+        <div class="cell-label">鎖漲停守住</div>
+        <div class="cell-value count-value" id="count-held">0</div>
+      </div>
+      <div class="status-cell count-touched">
+        <div class="cell-label">曾觸漲停</div>
+        <div class="cell-value count-value" id="count-touched">0</div>
+      </div>
+      <div class="status-cell count-watching">
+        <div class="cell-label">觀察中</div>
+        <div class="cell-value count-value" id="count-watching">0</div>
+      </div>
+    </section>
+
+    <div class="content-layout">
+      <section class="panel" aria-labelledby="stocks-title">
+        <header class="panel-header">
+          <div>
+            <h2 class="panel-title" id="stocks-title">即時標的</h2>
+            <p class="panel-meta" id="stock-summary">等待服務狀態</p>
+          </div>
+          <p class="panel-meta">
+            <span class="connection-note" id="connection-note">每秒更新</span>
+          </p>
+        </header>
+        <div class="stock-grid" id="stock-grid" aria-live="polite">
+          <div class="empty-state">
+            <span class="empty-icon" aria-hidden="true">◌</span>
+            正在取得即時標的
+          </div>
+        </div>
+      </section>
+
+      <aside class="panel alerts-panel" aria-labelledby="alerts-title">
+        <header class="panel-header">
+          <div>
+            <h2 class="panel-title" id="alerts-title">即時警報流</h2>
+            <p class="panel-meta">最新事件顯示在上方</p>
+          </div>
+          <p class="panel-meta" id="alert-count">0 則</p>
+        </header>
+        <div class="alert-list" id="alert-list" aria-live="polite">
+          <div class="empty-state">
+            <span class="empty-icon" aria-hidden="true">—</span>
+            尚無鎖漲停或疑似假試撮警報
+          </div>
+        </div>
+      </aside>
+    </div>
+  </main>
+
+  <script>
+    (() => {
+      "use strict";
+
+      const POLL_INTERVAL_MS = 1000;
+      const STATUS = {
+        suspected_fake: { icon: "▲", label: "疑似假試撮", className: "suspected_fake" },
+        locked_held: { icon: "●", label: "鎖漲停守住", className: "locked_held" },
+        touched: { icon: "◆", label: "曾觸漲停", className: "touched" },
+        watching: { icon: "◌", label: "觀察中", className: "watching" },
+        none: { icon: "－", label: "尚無訊號", className: "none" }
+      };
+      const SERVICE = {
+        idle: "待命",
+        armed: "已上線・等待窗口",
+        live: "試撮進行中",
+        closed: "已收盤",
+        replay: "歷史資料回放"
+      };
+
+      const elements = {
+        clock: document.getElementById("clock"),
+        serviceDot: document.getElementById("service-dot"),
+        serviceStatus: document.getElementById("service-status"),
+        windowLabel: document.getElementById("window-label"),
+        nextWindow: document.getElementById("next-window"),
+        countFake: document.getElementById("count-fake"),
+        countHeld: document.getElementById("count-held"),
+        countTouched: document.getElementById("count-touched"),
+        countWatching: document.getElementById("count-watching"),
+        stockSummary: document.getElementById("stock-summary"),
+        connectionNote: document.getElementById("connection-note"),
+        stockGrid: document.getElementById("stock-grid"),
+        alertCount: document.getElementById("alert-count"),
+        alertList: document.getElementById("alert-list")
+      };
+
+      let currentState = null;
+      let seenAlerts = new Set();
+      let initializedAlerts = false;
+      let pollTimer = null;
+
+      const numberFormatter = new Intl.NumberFormat("zh-TW");
+      const priceFormatter = new Intl.NumberFormat("zh-TW", {
+        minimumFractionDigits: 0,
+        maximumFractionDigits: 2
+      });
+      const timeFormatter = new Intl.DateTimeFormat("zh-TW", {
+        timeZone: "Asia/Taipei",
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+        hour12: false
+      });
+      const shortTimeFormatter = new Intl.DateTimeFormat("zh-TW", {
+        timeZone: "Asia/Taipei",
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+        hour12: false
+      });
+
+      function safeText(value, fallback = "—") {
+        if (value === null || value === undefined || value === "") return fallback;
+        return String(value);
+      }
+
+      function finiteNumber(value) {
+        const number = Number(value);
+        return Number.isFinite(number) ? number : null;
+      }
+
+      function formatPrice(value) {
+        const number = finiteNumber(value);
+        return number === null ? "—" : priceFormatter.format(number);
+      }
+
+      function formatVolume(value) {
+        const number = finiteNumber(value);
+        return number === null ? "—" : numberFormatter.format(number);
+      }
+
+      function parseTime(value) {
+        if (!value) return null;
+        const parsed = new Date(value);
+        return Number.isNaN(parsed.getTime()) ? null : parsed;
+      }
+
+      function formatTime(value) {
+        const parsed = parseTime(value);
+        return parsed ? shortTimeFormatter.format(parsed) : "—";
+      }
+
+      function countdown(targetValue) {
+        const target = parseTime(targetValue);
+        if (!target) return null;
+        const remaining = Math.max(0, target.getTime() - Date.now());
+        const totalSeconds = Math.floor(remaining / 1000);
+        const days = Math.floor(totalSeconds / 86400);
+        const hours = Math.floor((totalSeconds % 86400) / 3600);
+        const minutes = Math.floor((totalSeconds % 3600) / 60);
+        const seconds = totalSeconds % 60;
+        const hms = [hours, minutes, seconds]
+          .map((part) => String(part).padStart(2, "0"))
+          .join(":");
+        return days > 0 ? `${days}天 ${hms}` : hms;
+      }
+
+      function updateClock() {
+        elements.clock.textContent = timeFormatter.format(new Date());
+        if (!currentState) return;
+
+        const isLive = currentState.service_status === "live";
+        const next = countdown(currentState.next_window_at);
+        const windowValue = currentState.window || {};
+        elements.windowLabel.textContent = isLive ? "本次偵測窗口" : "距下次偵測窗口";
+        elements.nextWindow.textContent = isLive
+          ? `${safeText(windowValue.start)}–${safeText(windowValue.end)}`
+          : (next || safeText(currentState.next_window_at));
+      }
+
+      function statusDescriptor(stock) {
+        const key = Object.prototype.hasOwnProperty.call(STATUS, stock.status)
+          ? stock.status
+          : "none";
+        const descriptor = STATUS[key];
+        return {
+          ...descriptor,
+          label: safeText(stock.status_label, descriptor.label)
+        };
+      }
+
+      function makeElement(tag, className, text) {
+        const node = document.createElement(tag);
+        if (className) node.className = className;
+        if (text !== undefined) node.textContent = text;
+        return node;
+      }
+
+      function renderStocks(stocks) {
+        elements.stockGrid.replaceChildren();
+        if (!stocks.length) {
+          const empty = makeElement("div", "empty-state");
+          empty.append(
+            makeElement("span", "empty-icon", "◌"),
+            document.createTextNode("目前沒有納入偵測的標的")
+          );
+          elements.stockGrid.append(empty);
+          return;
+        }
+
+        stocks.forEach((stock) => {
+          const status = statusDescriptor(stock);
+          const card = makeElement("article", `stock-card ${status.className}`);
+          card.setAttribute(
+            "aria-label",
+            `${safeText(stock.code)} ${safeText(stock.name, "")}：${status.label}`
+          );
+
+          const head = makeElement("div", "stock-card-head");
+          const stockId = makeElement("div", "stock-id");
+          stockId.append(
+            makeElement("span", "stock-code", safeText(stock.code)),
+            makeElement("span", "stock-name", safeText(stock.name, "未命名"))
+          );
+          const badge = makeElement(
+            "span",
+            `status-badge ${status.className}`,
+            `${status.icon} ${status.label}`
+          );
+          head.append(stockId, badge);
+
+          const body = makeElement("div", "stock-body");
+          [
+            ["即時 bid0 價", formatPrice(stock.bid0_price)],
+            ["即時 bid0 量", formatVolume(stock.bid0_volume)],
+            ["試撮最高 bid0", formatPrice(stock.sim_high)]
+          ].forEach(([label, value]) => {
+            const metric = makeElement("div", "metric");
+            metric.append(
+              makeElement("div", "metric-label", label),
+              makeElement("div", "metric-value", value)
+            );
+            body.append(metric);
+          });
+
+          const sparkWrap = makeElement("div", "spark-wrap");
+          const sparkBlock = makeElement("div", "spark-block");
+          sparkBlock.append(makeElement("div", "spark-label", "bid0 堆量走勢"));
+          const canvas = makeElement("canvas", "sparkline");
+          canvas.setAttribute("role", "img");
+          canvas.setAttribute("aria-label", `${safeText(stock.code)} bid0 成交量趨勢`);
+          sparkBlock.append(canvas);
+
+          const lockMeta = makeElement("div", "lock-meta");
+          const dropped = stock.bid0_dropped ? "是" : "否";
+          lockMeta.append(
+            document.createTextNode(`首鎖 ${formatTime(stock.first_lock_time)}`),
+            document.createElement("br"),
+            document.createTextNode(`撤單訊號 ${dropped}`)
+          );
+          sparkWrap.append(sparkBlock, lockMeta);
+          card.append(head, body, sparkWrap);
+          elements.stockGrid.append(card);
+          drawSparkline(canvas, Array.isArray(stock.spark) ? stock.spark : [], status.className);
+        });
+      }
+
+      function sparkColor(status) {
+        if (status === "suspected_fake") return "#C8322A";
+        if (status === "locked_held") return "#B77514";
+        if (status === "touched") return "#2F7D5B";
+        return "#817A70";
+      }
+
+      function drawSparkline(canvas, points, status) {
+        const cssWidth = Math.max(80, Math.round(canvas.clientWidth || 180));
+        const cssHeight = Math.max(38, Math.round(canvas.clientHeight || 43));
+        const ratio = Math.min(window.devicePixelRatio || 1, 2);
+        canvas.width = Math.round(cssWidth * ratio);
+        canvas.height = Math.round(cssHeight * ratio);
+        const context = canvas.getContext("2d");
+        if (!context) return;
+        context.scale(ratio, ratio);
+
+        const values = points
+          .map((point) => finiteNumber(point && point.bid0_volume))
+          .filter((value) => value !== null);
+        context.lineWidth = 1;
+        context.strokeStyle = "#E7E1D7";
+        context.beginPath();
+        context.moveTo(0, cssHeight - 0.5);
+        context.lineTo(cssWidth, cssHeight - 0.5);
+        context.stroke();
+
+        if (values.length === 0) {
+          context.fillStyle = "#A69F94";
+          context.font = '11px "Microsoft JhengHei", sans-serif';
+          context.fillText("等待逐筆資料", 2, Math.round(cssHeight / 2) + 4);
+          return;
+        }
+
+        const minimum = Math.min(...values);
+        const maximum = Math.max(...values);
+        const spread = Math.max(1, maximum - minimum);
+        const pad = 3;
+        const xStep = values.length > 1 ? (cssWidth - pad * 2) / (values.length - 1) : 0;
+        const coordinates = values.map((value, index) => ({
+          x: values.length > 1 ? pad + index * xStep : cssWidth / 2,
+          y: pad + (1 - (value - minimum) / spread) * (cssHeight - pad * 2)
+        }));
+
+        const gradient = context.createLinearGradient(0, 0, 0, cssHeight);
+        const color = sparkColor(status);
+        gradient.addColorStop(0, `${color}2D`);
+        gradient.addColorStop(1, `${color}00`);
+        context.beginPath();
+        context.moveTo(coordinates[0].x, cssHeight - pad);
+        coordinates.forEach((point) => context.lineTo(point.x, point.y));
+        context.lineTo(coordinates[coordinates.length - 1].x, cssHeight - pad);
+        context.closePath();
+        context.fillStyle = gradient;
+        context.fill();
+
+        context.beginPath();
+        coordinates.forEach((point, index) => {
+          if (index === 0) context.moveTo(point.x, point.y);
+          else context.lineTo(point.x, point.y);
+        });
+        context.strokeStyle = color;
+        context.lineWidth = 2;
+        context.lineJoin = "round";
+        context.lineCap = "round";
+        context.stroke();
+
+        const last = coordinates[coordinates.length - 1];
+        context.beginPath();
+        context.arc(last.x, last.y, 2.7, 0, Math.PI * 2);
+        context.fillStyle = color;
+        context.fill();
+      }
+
+      function alertKey(alert) {
+        return [alert.ts, alert.code, alert.type, alert.message].map((item) => safeText(item, "")).join("|");
+      }
+
+      function renderAlerts(alerts) {
+        const sorted = alerts.slice().sort((left, right) => {
+          const leftTime = parseTime(left.ts);
+          const rightTime = parseTime(right.ts);
+          return (rightTime ? rightTime.getTime() : 0) - (leftTime ? leftTime.getTime() : 0);
+        });
+        const incomingKeys = new Set(sorted.map(alertKey));
+        elements.alertList.replaceChildren();
+        elements.alertCount.textContent = `${numberFormatter.format(sorted.length)} 則`;
+
+        if (!sorted.length) {
+          const empty = makeElement("div", "empty-state");
+          empty.append(
+            makeElement("span", "empty-icon", "—"),
+            document.createTextNode("尚無鎖漲停或疑似假試撮警報")
+          );
+          elements.alertList.append(empty);
+          seenAlerts = incomingKeys;
+          initializedAlerts = true;
+          return;
+        }
+
+        sorted.forEach((alert) => {
+          const fake = alert.type === "suspected_fake";
+          const key = alertKey(alert);
+          const isNew = initializedAlerts && !seenAlerts.has(key);
+          const item = makeElement(
+            "article",
+            `alert-item ${fake ? "suspected_fake" : "locked"}${isNew ? " is-new" : ""}`
+          );
+          const icon = makeElement("div", "alert-icon", fake ? "▲" : "●");
+          icon.setAttribute("aria-hidden", "true");
+          const content = makeElement("div", "alert-content");
+          const topLine = makeElement("div", "alert-topline");
+          topLine.append(
+            makeElement(
+              "div",
+              "alert-stock",
+              `${safeText(alert.code)} ${safeText(alert.name, "")}`.trim()
+            ),
+            makeElement("time", "alert-time", formatTime(alert.ts))
+          );
+          content.append(
+            topLine,
+            makeElement("p", "alert-message", safeText(alert.message, fake ? "疑似假試撮" : "鎖漲停"))
+          );
+          item.append(icon, content);
+          elements.alertList.append(item);
+        });
+
+        seenAlerts = incomingKeys;
+        initializedAlerts = true;
+      }
+
+      function setCount(element, value) {
+        const count = finiteNumber(value);
+        element.textContent = numberFormatter.format(count === null ? 0 : count);
+      }
+
+      function renderState(state) {
+        currentState = state;
+        const service = safeText(state.service_status, "idle");
+        const stocks = Array.isArray(state.stocks) ? state.stocks : [];
+        const alerts = Array.isArray(state.alerts) ? state.alerts : [];
+        const counts = state.counts || {};
+        const universe = finiteNumber(state.universe) ?? stocks.length;
+        const subscribed = finiteNumber(state.subscribed) ?? 0;
+
+        elements.serviceStatus.textContent = SERVICE[service] || service;
+        elements.serviceDot.className = `service-dot ${service}`;
+        elements.serviceDot.setAttribute("aria-label", elements.serviceStatus.textContent);
+        setCount(elements.countFake, counts.suspected_fake);
+        setCount(elements.countHeld, counts.locked_held);
+        setCount(elements.countTouched, counts.touched);
+        setCount(elements.countWatching, counts.watching);
+        elements.stockSummary.textContent =
+          `標的 ${numberFormatter.format(universe)} 檔・已訂閱 ${numberFormatter.format(subscribed)} 檔`;
+        elements.connectionNote.textContent = "每秒更新";
+        elements.connectionNote.classList.remove("offline");
+        renderStocks(stocks);
+        renderAlerts(alerts);
+        updateClock();
+      }
+
+      function showConnectionError() {
+        elements.serviceStatus.textContent = "連線中斷・正在重試";
+        elements.serviceDot.className = "service-dot";
+        elements.connectionNote.textContent = "暫時未連線";
+        elements.connectionNote.classList.add("offline");
+      }
+
+      async function pollState() {
+        window.clearTimeout(pollTimer);
+        try {
+          const response = await fetch("/api/state", {
+            cache: "no-store",
+            headers: { "Accept": "application/json" }
+          });
+          if (!response.ok) throw new Error(`state request failed: ${response.status}`);
+          const state = await response.json();
+          renderState(state);
+        } catch (error) {
+          showConnectionError();
+        } finally {
+          pollTimer = window.setTimeout(pollState, POLL_INTERVAL_MS);
+        }
+      }
+
+      window.addEventListener("resize", () => {
+        if (currentState && Array.isArray(currentState.stocks)) {
+          document.querySelectorAll(".sparkline").forEach((canvas, index) => {
+            const stock = currentState.stocks[index];
+            if (!stock) return;
+            const status = statusDescriptor(stock);
+            drawSparkline(canvas, Array.isArray(stock.spark) ? stock.spark : [], status.className);
+          });
+        }
+      });
+
+      window.setInterval(updateClock, 1000);
+      updateClock();
+      pollState();
+    })();
+  </script>
+</body>
+</html>
