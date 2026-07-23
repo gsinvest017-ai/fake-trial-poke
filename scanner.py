@@ -22,6 +22,8 @@ from zoneinfo import ZoneInfo
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
 TAIPEI = ZoneInfo("Asia/Taipei")
+DEFAULT_BID0_REMAIN_RATIO = 0.30
+DEFAULT_DROP_LOOKBACK_SECONDS = 30 * 60
 
 TOP_LEVEL_FIELDS = {
     "date",
@@ -138,9 +140,10 @@ def read_jsonl(path: Path) -> list[dict[str, Any]]:
                 raise ValueError(
                     f"{path.name} 第 {line_number} 行必須是 JSON object"
                 )
-            if item.get("kind") not in {"tick", "bidask"}:
+            if item.get("kind") not in {"tick", "bidask", "snapshot"}:
                 raise ValueError(
-                    f"{path.name} 第 {line_number} 行 kind 必須為 tick/bidask"
+                    f"{path.name} 第 {line_number} 行 kind 必須為 "
+                    "tick/bidask/snapshot"
                 )
             code = str(item.get("code") or "").strip()
             if not code:
@@ -212,29 +215,45 @@ def select_result_codes(
     """只輸出實際納入監控的標的，避免把 dropped universe 當成未觸及。
 
     recorder 若提供 subscribed_codes，零 callback 的已訂閱標的仍保留；
-    沒有這份清單時，有事件就以實收 callback codes 為準。唯有完全
-    沒事件且無 subscribed_codes 時，才以 metadata stocks 保留空結果。
+    沒有這份清單時，有串流事件就以實收 callback codes 為準。snapshot
+    僅是開盤證據，不得把未訂閱標的偽裝成 status=none。唯有完全沒有
+    串流事件且無 subscribed_codes 時，才以 metadata stocks 保留空結果。
     """
+    stream_codes = {
+        code
+        for code, events in event_groups.items()
+        if any(event.get("kind") in {"tick", "bidask"} for event in events)
+    }
     raw_subscribed_codes = metadata.get("subscribed_codes")
     if isinstance(raw_subscribed_codes, list):
         subscribed_codes = {
             str(code).strip() for code in raw_subscribed_codes if str(code).strip()
         }
-        return sorted(set(event_groups) | subscribed_codes)
+        return sorted(stream_codes | subscribed_codes)
+    if stream_codes:
+        return sorted(stream_codes)
     if event_groups:
-        return sorted(event_groups)
+        return []
     return sorted(stock_metadata)
 
 
 def assert_coverage_selection() -> None:
     """Red-team：dropped 不得偽裝成 status=none，零 callback 訂閱仍保留。"""
-    event_groups = {"1101": [{"code": "1101"}]}
+    event_groups = {
+        "1101": [{"code": "1101", "kind": "bidask"}],
+        "9999": [{"code": "9999", "kind": "snapshot"}],
+    }
     stock_metadata = {"1101": {}, "1102": {}, "9999": {}}
     metadata = {"subscribed_codes": ["1101", "1102"]}
     selected = select_result_codes(event_groups, stock_metadata, metadata)
     assert selected == ["1101", "1102"]
     assert "9999" not in selected
     assert select_result_codes(event_groups, stock_metadata, {}) == ["1101"]
+    assert select_result_codes(
+        {"9999": [{"code": "9999", "kind": "snapshot"}]},
+        stock_metadata,
+        {},
+    ) == []
     assert select_result_codes({}, stock_metadata, {}) == [
         "1101",
         "1102",
@@ -326,17 +345,27 @@ def opening_tick_price(
     return to_float(candidates[0]["price"]) if candidates else None
 
 
+def latest_snapshot(
+    events: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    snapshots = [
+        event for event in events if event.get("kind") == "snapshot"
+    ]
+    return max(snapshots, key=lambda event: event["_dt"], default=None)
+
+
 def bid0_drop_evidence(
     events: list[dict[str, Any]],
-    limit_up: float | None,
+    snapshot: dict[str, Any] | None,
     session_date: datetime,
     *,
     drop_ratio: float,
-    min_peak: int,
+    min_preopen: int,
     min_absolute: int,
     lookback_seconds: int,
 ) -> bool:
-    if limit_up is None:
+    """比較盤前末筆與開盤後 snapshot 的買一量，判斷是否明顯撤單。"""
+    if snapshot is None:
         return False
     cutoff = datetime.combine(session_date.date(), time(9, 0))
     window_start = cutoff - timedelta(seconds=lookback_seconds)
@@ -344,25 +373,37 @@ def bid0_drop_evidence(
     for event in events:
         if (
             event.get("kind") != "bidask"
-            or not bool(event.get("simtrade"))
+            or event.get("simtrade") is not True
             or not window_start <= event["_dt"] < cutoff
         ):
             continue
-        bid_price = first_item(event.get("bid_price"))
         bid_volume = max(0, to_int(first_item(event.get("bid_volume"))) or 0)
-        # 買一已離開漲停價，表示漲停買單在該次五檔更新中已不存在。
-        effective_volume = bid_volume if same_price(bid_price, limit_up) else 0
-        observations.append((event["_dt"], effective_volume))
+        observations.append((event["_dt"], bid_volume))
     observations.sort(key=lambda item: item[0])
-    if len(observations) < 2:
+    if not observations:
         return False
-    peak = max(volume for _, volume in observations)
-    final = observations[-1][1]
-    absolute_drop = peak - final
+    preopen_final = observations[-1][1]
+    raw_snapshot_volume = to_int(first_item(snapshot.get("bid_volume")))
+    if raw_snapshot_volume is None:
+        return False
+    snapshot_volume = max(0, raw_snapshot_volume)
+    if preopen_final <= 0:
+        return False
+    if snapshot_volume == 0:
+        return True
+    absolute_drop = preopen_final - snapshot_volume
+    remain_ratio = 1.0 - drop_ratio
+    actual_remain_ratio = snapshot_volume / preopen_final
     return (
-        peak >= min_peak
+        preopen_final >= min_preopen
         and absolute_drop >= min_absolute
-        and final <= peak * (1.0 - drop_ratio)
+        and actual_remain_ratio < remain_ratio
+        and not math.isclose(
+            actual_remain_ratio,
+            remain_ratio,
+            rel_tol=0.0,
+            abs_tol=1e-12,
+        )
     )
 
 
@@ -385,8 +426,11 @@ def stock_record(
     name = str(first_known(stock_meta, events, "name") or code)
     reference = to_float(first_known(stock_meta, events, "reference"))
     limit_up = infer_limit_up(stock_meta, events)
+    snapshot = latest_snapshot(events)
 
-    lock_times: list[datetime] = []
+    bidask_lock_times: list[datetime] = []
+    tick_lock_times: list[datetime] = []
+    has_simtrade_bidask = False
     sim_prices: list[float] = []
     bid0_volumes: list[int] = []
     chg_type_hit_1 = False
@@ -394,7 +438,7 @@ def stock_record(
     bid0_series: list[dict[str, Any]] = []
 
     for event in events:
-        simtrade = bool(event.get("simtrade"))
+        simtrade = event.get("simtrade") is True
         if event.get("kind") == "tick":
             price = to_float(event.get("price"))
             chg_type_one = simtrade and to_int(event.get("chg_type")) == 1
@@ -410,8 +454,8 @@ def stock_record(
                 if simtrade:
                     sim_prices.append(price)
             if simtrade and (chg_type_one or same_price(price, limit_up)):
-                lock_times.append(event["_dt"])
-        else:
+                tick_lock_times.append(event["_dt"])
+        elif event.get("kind") == "bidask":
             bid_price = to_float(first_item(event.get("bid_price")))
             bid_volume = max(0, to_int(first_item(event.get("bid_volume"))) or 0)
             bid0_series.append(
@@ -422,10 +466,16 @@ def stock_record(
                 }
             )
             if simtrade:
+                has_simtrade_bidask = True
                 bid0_volumes.append(bid_volume)
                 if same_price(bid_price, limit_up):
-                    lock_times.append(event["_dt"])
+                    bidask_lock_times.append(event["_dt"])
 
+    # 有 BidAsk 試撮串流時，鎖漲停完全由方法 B 決定；僅舊資料沒有
+    # BidAsk 試撮時，才保留 tick/chg_type 的相容 fallback。
+    lock_times = (
+        bidask_lock_times if has_simtrade_bidask else tick_lock_times
+    )
     locked_limit_up = bool(lock_times)
     first_lock = min(lock_times) if lock_times else None
     last_lock = max(lock_times) if lock_times else None
@@ -437,12 +487,26 @@ def stock_record(
 
     open_price: float | None = None
     if session == "preopen":
-        if open_source in {"auto", "tick"}:
+        if open_source == "auto" and snapshot is not None:
+            # snapshot 記錄存在但 open_price=null 代表仍無開盤價，不倒退
+            # 採用 tick，避免把不同時間來源混為同一份開盤證據。
+            open_price = to_float(snapshot.get("open_price"))
+        elif open_source == "auto":
             open_price = opening_tick_price(
                 events, session_date, open_grace_seconds
             )
-        if open_price is None and open_source in {"auto", "snapshot"}:
-            open_price = snapshot_prices.get(code)
+            if open_price is None:
+                open_price = snapshot_prices.get(code)
+        elif open_source == "snapshot":
+            open_price = (
+                to_float(snapshot.get("open_price"))
+                if snapshot is not None
+                else snapshot_prices.get(code)
+            )
+        elif open_source == "tick":
+            open_price = opening_tick_price(
+                events, session_date, open_grace_seconds
+            )
 
     open_gap_pct = (
         round((open_price / limit_up - 1.0) * 100.0, 4)
@@ -452,10 +516,10 @@ def stock_record(
     bid0_dropped = (
         bid0_drop_evidence(
             events,
-            limit_up,
+            snapshot,
             session_date,
             drop_ratio=drop_ratio,
-            min_peak=drop_min_peak,
+            min_preopen=drop_min_peak,
             min_absolute=drop_min_absolute,
             lookback_seconds=drop_lookback_seconds,
         )
@@ -645,6 +709,21 @@ def validate_result(result: dict[str, Any], *, sample: bool = False) -> None:
             for stock in result["stocks"]
         ):
             raise AssertionError("sample 每檔都必須有可畫的兩條 series")
+        by_code = {stock["code"]: stock for stock in result["stocks"]}
+        if by_code["2330"]["open_gap_pct"] != -7.0:
+            raise AssertionError("sample 未優先採用 inline snapshot 開盤價")
+        if by_code["2330"]["bid0_dropped"]:
+            raise AssertionError("sample 保留大單案例不應誤判撤單")
+        if not by_code["2317"]["bid0_dropped"]:
+            raise AssertionError("sample 開盤後買一歸零案例應判定撤單")
+        if by_code["2454"]["max_bid0_volume"] != 59000:
+            raise AssertionError("sample max_bid0_volume 必須只來自 BidAsk 串流")
+        if any(
+            point["t"].endswith("09:00:03")
+            for stock in result["stocks"]
+            for point in stock["bid0_series"]
+        ):
+            raise AssertionError("snapshot 不得混入 bid0_series")
 
 
 def write_result(path: Path, result: dict[str, Any]) -> None:
@@ -717,6 +796,26 @@ def sample_events(date_text: str) -> tuple[list[dict[str, Any]], dict[str, Any]]
             }
         )
 
+    def add_snapshot(
+        code: str,
+        open_price: float | None,
+        bid_price: float | None,
+        bid_volume: int,
+    ) -> None:
+        groups.append(
+            {
+                "code": code,
+                "name": next(spec[1] for spec in specs if spec[0] == code),
+                "ts": f"{date_text}T09:00:03",
+                "kind": "snapshot",
+                "open_price": open_price,
+                "bid_price": [bid_price, None, None, None, None],
+                "bid_volume": [bid_volume, 0, 0, 0, 0],
+                "ask_price": [None] * 5,
+                "ask_volume": [0] * 5,
+            }
+        )
+
     for code, _name, reference, limit_up, scenario in specs:
         early = round(reference * 1.02, 2)
         middle = round(reference * 1.06, 2)
@@ -763,13 +862,26 @@ def sample_events(date_text: str) -> tuple[list[dict[str, Any]], dict[str, Any]]
 
         if scenario == "fake_gap":
             add_tick(code, "09:00:01", round(limit_up * 0.95, 2), False, 4)
+            # 與 opening tick 刻意不同，用來驗證 inline snapshot 優先。
+            add_snapshot(code, round(limit_up * 0.93, 2), limit_up, 98000)
         elif scenario == "fake_drop":
             # 即使開盤價仍在漲停，開盤前大單驟撤也按 OR 準則列可疑。
             add_tick(code, "09:00:01", limit_up, False, 1)
+            add_snapshot(code, limit_up, reference * 1.02, 0)
         elif scenario == "held":
             add_tick(code, "09:00:01", limit_up, False, 1)
+            add_snapshot(code, limit_up, limit_up, 60000)
+        elif scenario == "touched":
+            # 有 snapshot 但尚無成交開盤價時，維持 touched，不倒退用 tick。
+            add_snapshot(code, None, limit_up, bids[-1])
         elif scenario == "none":
             add_tick(code, "09:00:01", float(prices[-1]), False, 2)
+            add_snapshot(
+                code,
+                float(prices[-1]),
+                float(bid_prices[-1]),
+                bids[-1],
+            )
 
     for event in groups:
         event["_dt"] = parse_ts(event["ts"])
@@ -808,8 +920,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         choices=("auto", "tick", "snapshot", "none"),
         default="auto",
         help=(
-            "開盤價來源：auto=09:00 後首筆真實 tick，缺時讀 "
-            "auction_YYYYMMDD.snapshot.json；snapshot=只讀 sidecar"
+            "開盤價來源：auto=優先 JSONL inline snapshot；完全沒有該記錄時 "
+            "才依序回退 09:00 tick、snapshot sidecar"
         ),
     )
     parser.add_argument(
@@ -826,14 +938,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--drop-ratio",
         type=float,
-        default=0.70,
-        help="買一堆量相對峰值減少比例門檻（預設 0.70）",
+        default=1.0 - DEFAULT_BID0_REMAIN_RATIO,
+        help="snapshot 買一量相對盤前末筆減少比例門檻（預設 0.70）",
     )
     parser.add_argument(
         "--drop-min-peak",
         type=int,
         default=1000,
-        help="啟用撤單判定的買一峰值最低張數（預設 1000）",
+        help="啟用撤單判定的盤前末筆買一最低張數（預設 1000）",
     )
     parser.add_argument(
         "--drop-min-absolute",
@@ -844,8 +956,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--drop-lookback-sec",
         type=int,
-        default=300,
-        help="撤單檢查的開盤前回看秒數（預設 300）",
+        default=DEFAULT_DROP_LOOKBACK_SECONDS,
+        help="尋找盤前末筆買一的回看秒數（預設 1800）",
     )
     return parser.parse_args(argv)
 

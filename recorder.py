@@ -1,9 +1,10 @@
 #!/usr/bin/env python
-"""即時錄製台股試撮 Tick 與五檔。
+"""即時錄製台股試撮五檔，並於時窗後補一輪全宇宙 snapshot。
 
 本程式只登入行情、讀取合約及訂閱報價；不啟用 CA、不選帳號、不下單。
 盤前試撮沒有可回補的歷史來源，因此 raw JSONL 逐筆保留時窗內收到的
-simtrade=True/False 訊息，讓下游同時能判讀試撮與 09:00 開盤。
+simtrade=True/False 訊息。預設只訂 BidAsk 以提高覆蓋率；必要時可用
+both 模式保留舊有 Tick+BidAsk 行為。
 """
 
 from __future__ import annotations
@@ -35,6 +36,7 @@ MAX_STREAM_ATTEMPTS = 600
 PREP_SECONDS = 45
 CAPACITY_EVENT_SETTLE_SECONDS = 1.5
 SUBSCRIBE_EVENT_GRACE_SECONDS = 0.01
+SNAPSHOT_AFTER_OPEN_SECONDS = 3
 PRIORITY_CODES = (
     "2330",
     "2317",
@@ -52,6 +54,9 @@ PRIORITY_CODES = (
     "1301",
     "1303",
 )
+PRIORITY_RANK = {
+    code: index for index, code in enumerate(PRIORITY_CODES)
+}
 
 REDACTIONS: list[str] = []
 PENDING_REPORT_PATH: Path | None = None
@@ -306,6 +311,15 @@ def get_stock_contract(api: Any, code: str) -> Any | None:
     return contract if resolved in valid_codes else None
 
 
+def universe_sort_key(item: tuple[str, Any]) -> tuple[bool, int, str]:
+    code = item[0]
+    return (
+        code.startswith("00"),
+        PRIORITY_RANK.get(code, len(PRIORITY_RANK)),
+        code,
+    )
+
+
 def stock_future_universe(api: Any) -> list[tuple[str, Any]]:
     raw_codes = {
         normalize_code(getattr(contract, "underlying_code", ""))
@@ -318,10 +332,11 @@ def stock_future_universe(api: Any) -> list[tuple[str, Any]]:
         contract = get_stock_contract(api, raw_code)
         if contract is not None:
             contracts[normalize_code(getattr(contract, "code", ""))] = contract
-    priority_rank = {code: index for index, code in enumerate(PRIORITY_CODES)}
     return sorted(
         contracts.items(),
-        key=lambda item: (priority_rank.get(item[0], len(priority_rank)), item[0]),
+        # 00 開頭是 ETF 型標的；串流不足時先讓位，確保個股優先。
+        # 同一類別內保留原有的大型股優先、再依代碼排序。
+        key=universe_sort_key,
     )
 
 
@@ -485,6 +500,57 @@ def bidask_record(bidask: Any, code: str) -> dict[str, Any]:
     }
 
 
+def snapshot_levels(
+    snapshot: Any,
+    levels_field: str,
+    best_field: str,
+    converter: Any,
+) -> list[Any]:
+    """相容五檔陣列及 Snapshot 僅提供最佳一檔的 scalar 欄位。"""
+    values = as_list(getattr(snapshot, levels_field, None))
+    if not values:
+        values = [getattr(snapshot, best_field, None)]
+    return five_levels(values, converter)
+
+
+def snapshot_record(
+    snapshot: Any,
+    fallback_code: str,
+    name_by_code: dict[str, str],
+    observed_at: datetime,
+) -> dict[str, Any]:
+    raw_time = getattr(snapshot, "ts", None)
+    if raw_time is None:
+        raw_time = getattr(snapshot, "datetime", None)
+    snapshot_time = event_datetime(raw_time)
+    if snapshot_time is None:
+        snapshot_time = observed_at
+
+    code = normalize_code(getattr(snapshot, "code", "")) or fallback_code
+    open_price = getattr(snapshot, "open_price", None)
+    if open_price is None:
+        open_price = getattr(snapshot, "open", None)
+    return {
+        "code": code,
+        "name": name_by_code.get(code, ""),
+        "ts": iso_local(snapshot_time),
+        "kind": "snapshot",
+        "open_price": to_float(open_price),
+        "bid_price": snapshot_levels(
+            snapshot, "bid_price", "buy_price", to_float
+        ),
+        "bid_volume": snapshot_levels(
+            snapshot, "bid_volume", "buy_volume", to_int
+        ),
+        "ask_price": snapshot_levels(
+            snapshot, "ask_price", "sell_price", to_float
+        ),
+        "ask_volume": snapshot_levels(
+            snapshot, "ask_volume", "sell_volume", to_int
+        ),
+    }
+
+
 def contract_meta(code: str, contract: Any) -> dict[str, Any]:
     return {
         "code": code,
@@ -534,7 +600,7 @@ def run_recorder(args: argparse.Namespace) -> int:
     if args.smoke is not None:
         start_at = datetime.now().replace(tzinfo=None)
         end_at = start_at + timedelta(seconds=float(args.smoke))
-        PENDING_REPORT_PATH = LOG_DIR / "recorder-smoke-out.txt"
+        PENDING_REPORT_PATH = LOG_DIR / "recorder-smoke2-out.txt"
         print(f"smoke={float(args.smoke):g} 秒；立即驗證訂閱管線")
     else:
         PENDING_REPORT_PATH = (
@@ -594,6 +660,10 @@ def run_recorder(args: argparse.Namespace) -> int:
     capacity_exact = False
     exit_code = 1
     unsubscribe_failures = 0
+    snapshot_count = 0
+    snapshot_requested = 0
+    snapshot_error = ""
+    channels_per_stock = 1 if args.channels == "bidask" else 2
 
     def should_record(event_time: datetime | None) -> bool:
         if not recording.is_set() or event_time is None:
@@ -690,6 +760,10 @@ def run_recorder(args: argparse.Namespace) -> int:
             f"標的宇宙={len(universe)} 檔"
             + ("（預設股期對應現貨）" if args.universe is None else "（自訂）")
         )
+        print(
+            f"channels={args.channels}；"
+            f"每檔串流數={channels_per_stock}"
+        )
         if unresolved:
             print(
                 f"找不到合約 {len(unresolved)} 檔=" + ",".join(unresolved)
@@ -707,15 +781,20 @@ def run_recorder(args: argparse.Namespace) -> int:
 
         fully_issued_codes: list[str] = []
         hard_candidate_count = min(
-            len(universe), MAX_STREAM_ATTEMPTS // 2
+            len(universe), MAX_STREAM_ATTEMPTS // channels_per_stock
         )
         candidates = universe[:hard_candidate_count]
         stop_subscriptions = False
+        quote_types = (
+            (QuoteType.BidAsk,)
+            if args.channels == "bidask"
+            else (QuoteType.Tick, QuoteType.BidAsk)
+        )
 
         for code, contract in candidates:
             candidate_codes.add(code)
             pair_issued = True
-            for quote_type in (QuoteType.Tick, QuoteType.BidAsk):
+            for quote_type in quote_types:
                 if (
                     subscription_limit.is_set()
                     or attempted_streams >= MAX_STREAM_ATTEMPTS
@@ -770,7 +849,8 @@ def run_recorder(args: argparse.Namespace) -> int:
         if failed_at is not None:
             capacity_streams = max(0, failed_at - 1)
             subscribed_count = min(
-                len(fully_issued_codes), capacity_streams // 2
+                len(fully_issued_codes),
+                capacity_streams // channels_per_stock,
             )
             successful_codes = fully_issued_codes[:subscribed_count]
             capacity_exact = True
@@ -788,27 +868,48 @@ def run_recorder(args: argparse.Namespace) -> int:
             )
 
         successful_set = set(successful_codes)
-        dropped_codes = [
+        capacity_dropped_codes = [
             code for code, _ in universe if code not in successful_set
         ]
-        dropped_codes.extend(code for code in unresolved if code not in dropped_codes)
+        dropped_etf_codes = [
+            code for code in capacity_dropped_codes if code.startswith("00")
+        ]
+        dropped_stock_codes = [
+            code
+            for code in capacity_dropped_codes
+            if not code.startswith("00")
+        ]
+        # meta.dropped 延續舊契約：包含無法解析的自訂代碼。
+        dropped_codes = list(capacity_dropped_codes)
+        dropped_codes.extend(
+            code for code in unresolved if code not in dropped_codes
+        )
 
         print(
             f"成功訂閱檔數={subscribed_count}；"
-            f"成功完整串流={subscribed_count * 2}"
+            f"成功串流={subscribed_count * channels_per_stock}"
         )
         print(
             f"解析出的真實訂閱上限={capacity_streams} 條串流；"
-            f"換算完整 Tick+BidAsk={capacity_streams // 2} 檔；"
+            f"channels={args.channels} 可涵蓋="
+            f"{capacity_streams // channels_per_stock} 檔；"
             f"是否撞到邊界={'Y' if capacity_exact else 'N'}；佐證={capacity_basis}"
         )
-        if dropped_codes:
+        if capacity_dropped_codes:
             print(
-                f"超限截斷/丟棄 {len(dropped_codes)} 檔="
-                + ",".join(dropped_codes)
+                f"超限截斷/丟棄 {len(capacity_dropped_codes)} 檔="
+                + ",".join(capacity_dropped_codes)
             )
         else:
             print("超限截斷/丟棄 0 檔=無")
+        print(
+            f"被讓位 ETF 型清單 {len(dropped_etf_codes)} 檔="
+            + (",".join(dropped_etf_codes) if dropped_etf_codes else "無")
+        )
+        print(
+            f"未涵蓋非 ETF 個股 {len(dropped_stock_codes)} 檔="
+            + (",".join(dropped_stock_codes) if dropped_stock_codes else "無")
+        )
         if subscribed_count <= 0:
             print("驗收 FAIL：成功訂閱檔數不是正數")
             return 2
@@ -841,6 +942,48 @@ def run_recorder(args: argparse.Namespace) -> int:
                 time.sleep(min(0.25, remaining))
             recording.clear()
 
+        if args.smoke is None and session == "preopen":
+            after_open = datetime.combine(
+                end_at.date(), datetime_time(9, 0)
+            ) + timedelta(seconds=SNAPSHOT_AFTER_OPEN_SECONDS)
+            snapshot_at = max(end_at, after_open)
+            if datetime.now().replace(tzinfo=None) < snapshot_at:
+                wait_until(snapshot_at, "等待 09:00 後 snapshot")
+
+        snapshot_requested = len(universe)
+        snapshot_observed_at = datetime.now().replace(tzinfo=None)
+        try:
+            with quiet_library_call():
+                raw_snapshots = api.snapshots(
+                    [contract for _, contract in universe],
+                    timeout=30_000,
+                )
+            for index, snapshot in enumerate(as_list(raw_snapshots)):
+                fallback_code = (
+                    universe[index][0] if index < len(universe) else ""
+                )
+                record = snapshot_record(
+                    snapshot,
+                    fallback_code,
+                    name_by_code,
+                    snapshot_observed_at,
+                )
+                if not record["code"]:
+                    continue
+                snapshot_count += 1
+                if writer is not None:
+                    writer.put(record)
+        except Exception as exc:
+            snapshot_error = safe_error(exc)
+        print(
+            f"snapshot 掃描檔數={snapshot_count}/{snapshot_requested}"
+            + (
+                f"；FAILED（{snapshot_error}）"
+                if snapshot_error
+                else ""
+            )
+        )
+
         if writer is not None:
             writer.close()
 
@@ -861,8 +1004,11 @@ def run_recorder(args: argparse.Namespace) -> int:
             frozen_errors.append(f"Writer:{safe_error(writer.error)}")
 
         callback_ok = (
-            frozen_counts["tick"] > 0
-            and frozen_counts["bidask"] > 0
+            frozen_counts["bidask"] > 0
+            and (
+                args.channels == "bidask"
+                or frozen_counts["tick"] > 0
+            )
             and not frozen_errors
         )
         print(
@@ -898,12 +1044,17 @@ def run_recorder(args: argparse.Namespace) -> int:
             "universe_size": len(universe),
             "requested_universe_size": requested_count,
             "subscribed": subscribed_count,
+            "channels": args.channels,
+            "channels_per_stock": channels_per_stock,
             # sub_limit 保留 Shioaji 原始「串流通道」單位；另明列股票檔數。
             "sub_limit": capacity_streams,
             "sub_limit_unit": "streams",
-            "sub_limit_stocks": capacity_streams // 2,
+            "sub_limit_stocks": capacity_streams // channels_per_stock,
             "sub_limit_exact": capacity_exact,
             "capacity_basis": capacity_basis,
+            "snapshot_count": snapshot_count,
+            "snapshot_requested": snapshot_requested,
+            "snapshot_complete": snapshot_count == snapshot_requested,
             "generated_at": datetime.now()
             .replace(tzinfo=None)
             .isoformat(timespec="seconds"),
@@ -914,12 +1065,15 @@ def run_recorder(args: argparse.Namespace) -> int:
             ],
         }
 
-        acceptance = callback_ok and subscribed_count > 0
+        snapshot_ok = snapshot_count == snapshot_requested
+        acceptance = callback_ok and subscribed_count > 0 and snapshot_ok
         print(
             "管線驗收="
             + ("PASS" if acceptance else "FAIL")
-            + "（成功訂閱>0 且 Tick/BidAsk callback 正常）"
+            + "（成功訂閱>0、模式所需 callback 正常、snapshot 完整）"
         )
+        if args.smoke is not None:
+            print("是否遇 0xC0000142=N（本次程序正常啟動）")
         exit_code = 0 if acceptance else 2
     finally:
         recording.clear()
@@ -968,7 +1122,7 @@ def run_recorder(args: argparse.Namespace) -> int:
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="即時錄製股票試撮 Tick/BidAsk（行情唯讀）"
+        description="即時錄製股票試撮 BidAsk／選配 Tick（行情唯讀）"
     )
     parser.add_argument("--start", type=parse_hhmm, help="開始時間 HH:MM")
     parser.add_argument("--end", type=parse_hhmm, help="結束時間 HH:MM")
@@ -985,6 +1139,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--universe",
         help="逗號分隔代碼，或 UTF-8 txt/JSON 代碼清單；預設股期對應現貨",
+    )
+    parser.add_argument(
+        "--channels",
+        choices=("bidask", "both"),
+        default="bidask",
+        help="bidask=單通道提高覆蓋率（預設）；both=Tick+BidAsk 舊行為",
     )
     return parser.parse_args(argv)
 
