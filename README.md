@@ -1,147 +1,134 @@
-# Shioaji 盤前試撮偵測器：接手人安裝手冊
+# Shioaji 盤前試撮即時偵測器服務
 
-本專案的排程器是資料夾內的 `scheduler.py` 常駐程式，不會向 Windows 工作排程器註冊任務。整個資料夾可複製到另一台 Windows 電腦；接手人在新位置執行 `setup.bat` 後即可使用。
+本專案是常駐在本機的即時偵測器服務，不是產生靜態報告的批次工具。服務啟動後會先提供本機網頁並保持待命；到了預設的盤前試撮窗口 08:30–09:00，會自動接上 Shioaji 行情、即時更新偵測狀態。
 
-正式流程會在週一至週五台北時間 08:25 呼叫：
+預設網頁位址：
 
 ```text
-run_session.py --session preopen
-  ├─ recorder.py
-  ├─ scanner.py
-  └─ generate_dashboard.py
+http://127.0.0.1:8900/
 ```
+
+服務只做行情唯讀登入，不啟用憑證、不選交易帳號，也不下單。
 
 ## 1. 系統需求
 
 - Windows 10 或 Windows 11，64 位元。
-- 64 位元 Python 3.12。此版本已在 Windows 11、Python 3.12.10 實測。
-- 第一次安裝相依套件時需要網路。
-- 可使用 Shioaji API 的永豐金證券帳號與該使用者自己的 API key／secret key。
+- 64 位元 Python 3.12。
+- 第一次安裝 Python 套件時需要網路。
+- 可使用 Shioaji API 的永豐金證券帳號，以及使用者自己的 API key／secret key。
 
-不需系統管理員權限。`scheduler.py`、`.venv`、狀態檔、log 與輸出資料都位於本專案資料夾內。
+整個專案可以複製到其他資料夾或電腦。請勿直接搬用別台電腦建立的 `.venv`；在新位置重新執行 `setup.bat` 即可。
 
-## 2. 一鍵初始化
+## 2. 初始化與填寫金鑰
 
 1. 將整個專案資料夾複製到接手人的電腦。
 2. 雙擊 `setup.bat`。
-3. `setup.bat` 會在本資料夾建立 `.venv`，再執行 `pip install -r requirements.txt`。
-4. 若尚無 `.env`，它會從 `.env.example` 複製一份；若已有 `.env` 則不會覆寫。
-
-若畫面顯示找不到 Python，請先安裝 64 位元 Python 3.12，安裝時建議勾選「Add Python to PATH」，再重新執行 `setup.bat`。
-
-## 3. 填入接手人的 Shioaji 金鑰
-
-用文字編輯器開啟專案根目錄的 `.env`，填入接手人自己的資料：
+3. 安裝程式會在專案資料夾建立 `.venv`，並安裝 `requirements.txt`。
+4. 若專案內尚無 `.env`，安裝程式會從 `.env.example` 建立一份。
+5. 用文字編輯器開啟 `.env`，填入接手人自己的資料：
 
 ```dotenv
 SHIOAJI_API_KEY=接手人自己的_api_key
 SHIOAJI_SECRET_KEY=接手人自己的_secret_key
 ```
 
-不要加多餘空格，也不要把 `.env` 上傳到 Git、寄到群組或貼到問題回報。專案的 `.gitignore` 已排除 `.env`，但仍應由人員確認交付內容。
+不要在等號前後加入多餘空格。若安裝時顯示找不到 Python，請先安裝 64 位元 Python 3.12，並建議在安裝畫面勾選「Add Python to PATH」。
 
-## 金鑰安全警告：交付前必讀
+## 3. 啟動即時服務
 
-**把資料夾交給別人以前，務必刪除自己的 `.env`；該檔含真實金鑰。**
+填妥 `.env` 後，雙擊 `start.bat`。它會：
 
-交付包只能保留不含金鑰的 `.env.example`。接手人應從 `.env.example` 建立新的 `.env`，並填入接手人自己的 Shioaji 金鑰。不要沿用、複製或傳送原持有人的金鑰。
+1. 優先使用本資料夾的 `.venv\Scripts\python.exe`。
+2. 若 `.venv` 不存在，回退到系統的 `python`。
+3. 以 live 模式啟動 `service.py`。
+4. 在畫面提示以瀏覽器開啟 `http://127.0.0.1:8900/`。
 
-## 4. 先做離線驗證
+命令視窗必須保持開啟。關閉視窗或按 `Ctrl+C` 會停止服務。
 
-完成初始化後，可在專案資料夾開啟 PowerShell：
+服務一啟動就會提供網頁；未進入試撮窗口時顯示待命狀態。預設盤前試撮窗口為台北時間 08:30–09:00，服務會自動準備行情連線並在窗口內即時偵測，窗口結束後以 snapshot 收口，之後繼續待命下一個窗口。
+
+> 目前的日期判斷以平日為主，不包含台灣證券交易所休市日或補交易日行事曆。
+
+## 4. Replay 離線測試
+
+Replay 模式會讀取既有的試撮 JSONL，不登入 Shioaji。請在專案資料夾開啟 PowerShell，執行：
+
+```powershell
+.\.venv\Scripts\python.exe service.py --replay data\auction_YYYYMMDD.jsonl --speed 20
+```
+
+將 `YYYYMMDD` 換成實際檔案日期，`--speed` 是重播加速倍率。Replay 啟動後同樣用瀏覽器開啟：
+
+```text
+http://127.0.0.1:8900/
+```
+
+若不使用專案虛擬環境，也可改用：
+
+```powershell
+python service.py --replay data\auction_YYYYMMDD.jsonl --speed 20
+```
+
+## 5. 開機登入後自動啟動（選用）
+
+雙擊 `install_autostart.bat`，會在目前使用者的 Windows「啟動」資料夾建立捷徑，登入後自動呼叫本專案的 `start.bat`。此動作不需要系統管理員權限。
+
+若專案資料夾改名或搬家，請先雙擊 `uninstall_autostart.bat` 移除舊捷徑，搬移完成後再從新位置執行 `install_autostart.bat`。
+
+移除自動啟動只會刪除捷徑，不會刪除專案、資料或金鑰檔。
+
+## 6. 定時看門狗（選用）
+
+`scheduler.py` 不是行情服務本身；它會在平日設定時間檢查本機 PORT 8900。若服務已在監聽就跳過，未監聽才使用同一個 Python 啟動 `service.py`。
+
+查看下一次檢查時點，不啟動服務：
 
 ```powershell
 .\.venv\Scripts\python.exe scheduler.py --dry
 ```
 
-此命令只印出下一次平日觸發時間，不會登入 Shioaji。
-
-接著執行：
+立即確保服務啟動一次：
 
 ```powershell
 .\.venv\Scripts\python.exe scheduler.py --once
 ```
 
-`--once` 會立即呼叫 `run_session.py --session preopen --sample`，完成 scanner 與 dashboard 的離線串接驗證，不登入 Shioaji，也不改寫每日正式觸發狀態。驗證用 dashboard 會放在 `log/scheduler_once_dashboard.html`。
-
-## 5. 啟動資料夾內常駐排程
-
-雙擊 `start.bat`。它會：
-
-1. 優先使用本資料夾的 `.venv\Scripts\python.exe`。
-2. 若 `.venv` 不存在，回退到系統的 `python`。
-3. 啟動本資料夾內的 `scheduler.py` 並保持常駐。
-
-命令視窗必須保持開啟；關閉視窗或關機後，常駐排程就會停止。重新開機後可再次雙擊 `start.bat`，或使用下一節的選用自動啟動。
-
-預設排程：
-
-- 時區：Asia/Taipei（UTC+8）。
-- 日期：週一至週五。
-- 時間：08:25。
-- session：`preopen`。
-- 08:25 後才啟動時，預設可在 09:00 前補觸發；09:00 後會等下一個平日。
-- 每日只嘗試一次，記錄於 `.scheduler_state.json`。
-- `.scheduler.lock` 會防止同一資料夾同時啟動兩個常駐排程器。
-- 例外與執行結果寫入 `log/scheduler.log`；子程序失敗後排程器仍會繼續常駐。
-
-臨時調整時間可由命令列傳入：
+讓看門狗保持常駐，預設於平日 08:20 檢查：
 
 ```powershell
-.\start.bat --at 08:20 --session preopen
+.\.venv\Scripts\python.exe scheduler.py
 ```
 
-也可調整 `scheduler.py` 開頭的 `DEFAULT_TRIGGER_AT` 與 `DEFAULT_SESSION` 常數。若誤開第二個 `start.bat`，單一實例鎖會拒絕第二個常駐程序。
-
-> 此排程只判斷週一至週五，不含台灣證券交易所休市日或補班／補交易日行事曆。
-
-## 6. 開機登入後自動啟動（選用）
-
-雙擊 `install_autostart.bat`，它會在「目前使用者」的 Windows 啟動資料夾建立 `Shioaji Preopen Scheduler.lnk`，捷徑指向本資料夾內的 `start.bat`。此動作不需要系統管理員權限。
-
-這是整套可攜流程中唯一會在專案資料夾以外建立內容、也就是唯一會碰到「這台電腦」的步驟。排程邏輯、Python、狀態與 log 仍全部留在專案資料夾；捷徑只負責登入後啟動它。
-
-移除自動啟動時雙擊：
-
-```text
-uninstall_autostart.bat
-```
-
-移除程式只會刪除上述捷徑，不會刪除專案或資料。若專案資料夾改名或搬家，請先執行 `uninstall_autostart.bat`，搬移後再從新位置執行 `install_autostart.bat`。
-
-## 7. 每日產出與檔案位置
-
-- `data/auction_YYYYMMDD.jsonl`：盤前試撮原始事件。
-- `data/auction_YYYYMMDD.meta.json`：錄製 metadata。
-- `data/result_YYYYMMDD.json`：scanner 分析結果。
-- `dashboard.html`：最新的自包含離線 dashboard，可直接以瀏覽器開啟。
-- `log/`：recorder 與 scheduler 執行紀錄。
-- `.scheduler_state.json`：當日是否已觸發的資料夾內狀態檔。
-- `.scheduler.lock`：防止重複開啟常駐排程的資料夾內鎖檔。
-
-`data/`、`log/`、`.venv/`、`.env`、`.scheduler_state.json` 與 `.scheduler.lock` 都不會由 Git 追蹤。若需要把每日資料一併交接，請另外確認資料保存與個資／機敏資訊政策。
-
-## 8. 可攜性與舊排程說明
-
-- 所有執行路徑都由 `__file__`、`%~dp0` 或 `$PSScriptRoot` 推導，沒有寫死某位使用者的磁碟路徑。
-- 複製資料夾後，建議在新電腦重新執行 `setup.bat`，不要直接搬用舊電腦建立的 `.venv`。
-- 新流程不需要執行 `schedule_morning.ps1`；該檔是舊版 Windows 工作排程器流程，保留僅供既有環境辨識。新接手人應使用 `start.bat`／`scheduler.py`。
-- 若原電腦曾用舊版 `schedule_morning.ps1` 註冊工作排程，應在原電腦另行移除舊任務，避免與新常駐排程重複執行。
-
-## 9. 常見問題
-
-### `scheduler.py --once` 成功，但正式執行登入失敗
-
-`--once` 是離線 sample，不會驗證真實 Shioaji 金鑰。請檢查 `.env` 是否填入接手人自己的有效 key 與 secret，且檔名確實為 `.env`。
-
-### 雙擊 `start.bat` 後立刻關閉
-
-先執行 `setup.bat`，再於 PowerShell 執行以下命令查看錯誤：
+需要調整檢查時間時可使用：
 
 ```powershell
-.\.venv\Scripts\python.exe scheduler.py --dry
+.\.venv\Scripts\python.exe scheduler.py --at 08:15
 ```
 
-### 今天不想執行
+## 7. 金鑰安全
 
-在 08:25 前關閉常駐視窗即可。再次啟動後，只要仍在當日補觸發時窗內且 `.scheduler_state.json` 尚未記錄當日，就會執行一次。
+`.env` 內含真實 Shioaji 金鑰，不可上傳到 Git、寄到群組、貼到問題回報或放進交付包。
+
+**把資料夾交給別人以前，務必刪除自己的 `.env`。**
+
+交付包只保留不含金鑰的 `.env.example`。接手人應執行 `setup.bat` 建立新的 `.env`，並填入自己的金鑰；不要沿用、複製或傳送原持有人的金鑰。
+
+## 8. 常見問題
+
+### 瀏覽器無法開啟
+
+先確認啟動服務的命令視窗仍在執行，並查看畫面是否出現 `HTTP 啟動 FAILED`。PORT 8900 若已被其他程式占用，服務會無法啟動。
+
+### Live 模式登入失敗
+
+確認 `.env` 位於專案根目錄，變數名稱正確，且填入的是目前使用者自己的有效 API key 與 secret key。Replay 成功不代表真實金鑰一定有效。
+
+### 如何直接驗證偵測器單元測試
+
+在專案根目錄執行：
+
+```powershell
+python tests\test_detector.py
+```
+
+此測試不需設定 `PYTHONPATH`，也不會登入 Shioaji。

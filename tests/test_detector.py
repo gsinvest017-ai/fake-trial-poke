@@ -2,7 +2,14 @@
 
 from __future__ import annotations
 
+import pathlib
+import sys
 import unittest
+
+sys.path.insert(
+    0,
+    str(pathlib.Path(__file__).resolve().parent.parent),
+)
 
 from detector import Detector
 
