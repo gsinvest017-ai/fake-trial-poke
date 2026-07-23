@@ -24,6 +24,7 @@ DATA_DIR = BASE_DIR / "data"
 TAIPEI = ZoneInfo("Asia/Taipei")
 DEFAULT_BID0_REMAIN_RATIO = 0.30
 DEFAULT_DROP_LOOKBACK_SECONDS = 30 * 60
+SNAPSHOT_LIMIT_TOLERANCE_RATIO = 0.001
 
 TOP_LEVEL_FIELDS = {
     "date",
@@ -354,6 +355,26 @@ def latest_snapshot(
     return max(snapshots, key=lambda event: event["_dt"], default=None)
 
 
+def snapshot_limit_status(
+    snapshot: dict[str, Any] | None,
+    limit_up: float | None,
+) -> str | None:
+    """用 snapshot 最佳買賣價判斷無成交價時是否仍貼近漲停。"""
+    if snapshot is None or limit_up is None or limit_up <= 0:
+        return None
+    quotes = [
+        to_float(first_item(snapshot.get(field)))
+        for field in ("bid_price", "ask_price")
+    ]
+    valid_quotes = [price for price in quotes if price is not None and price > 0]
+    if not valid_quotes:
+        return None
+    held_threshold = limit_up * (1.0 - SNAPSHOT_LIMIT_TOLERANCE_RATIO)
+    if any(price >= held_threshold for price in valid_quotes):
+        return "locked_held"
+    return "suspected_fake"
+
+
 def bid0_drop_evidence(
     events: list[dict[str, Any]],
     snapshot: dict[str, Any] | None,
@@ -484,6 +505,11 @@ def stock_record(
         if first_lock is not None and last_lock is not None
         else 0.0
     )
+    bid0_prices = [
+        point["bid0_price"]
+        for point in bid0_series
+        if point["bid0_price"] is not None
+    ]
 
     open_price: float | None = None
     if session == "preopen":
@@ -526,6 +552,11 @@ def stock_record(
         if session == "preopen"
         else False
     )
+    snapshot_status = (
+        snapshot_limit_status(snapshot, limit_up)
+        if open_price is None
+        else None
+    )
 
     if locked_limit_up and (
         (open_gap_pct is not None and open_gap_pct < -0.0001) or bid0_dropped
@@ -533,6 +564,8 @@ def stock_record(
         status = "suspected_fake"
     elif locked_limit_up and open_gap_pct is not None:
         status = "locked_held"
+    elif locked_limit_up and snapshot_status is not None:
+        status = snapshot_status
     elif locked_limit_up:
         # 沒有 09:00 後證據時不宣稱「守住」，保守停在曾觸漲停。
         status = "touched"
@@ -548,7 +581,7 @@ def stock_record(
         "first_lock_time": iso_seconds(first_lock) if first_lock else None,
         "last_lock_time": iso_seconds(last_lock) if last_lock else None,
         "lock_duration_sec": duration,
-        "sim_high": max(sim_prices) if sim_prices else 0.0,
+        "sim_high": max(sim_prices or bid0_prices, default=0.0),
         "max_bid0_volume": max(bid0_volumes) if bid0_volumes else 0,
         "chg_type_hit_1": chg_type_hit_1,
         "open_price": open_price,
@@ -739,7 +772,7 @@ def sample_events(date_text: str) -> tuple[list[dict[str, Any]], dict[str, Any]]
         ("2330", "台積電", 1000.0, 1100.0, "fake_gap"),
         ("2317", "鴻海", 220.0, 242.0, "fake_drop"),
         ("2454", "聯發科", 1500.0, 1650.0, "held"),
-        ("2308", "台達電", 900.0, 990.0, "touched"),
+        ("2308", "台達電", 900.0, 990.0, "fallback_held"),
         ("2603", "長榮", 210.0, 231.0, "touched"),
         ("2382", "廣達", 300.0, 330.0, "none"),
         ("3231", "緯創", 120.0, 132.0, "none"),
@@ -832,7 +865,7 @@ def sample_events(date_text: str) -> tuple[list[dict[str, Any]], dict[str, Any]]
             prices = [middle, limit_up, limit_up, limit_up, limit_up]
             bids = [2400, 12000, 35000, 51000, 59000]
             bid_prices = [middle, limit_up, limit_up, limit_up, limit_up]
-        elif scenario == "touched":
+        elif scenario in {"fallback_held", "touched"}:
             prices = [early, middle, limit_up, limit_up, limit_up]
             bids = [600, 1400, 4600, 6200, 5900]
             bid_prices = [early, middle, limit_up, limit_up, limit_up]
@@ -871,9 +904,12 @@ def sample_events(date_text: str) -> tuple[list[dict[str, Any]], dict[str, Any]]
         elif scenario == "held":
             add_tick(code, "09:00:01", limit_up, False, 1)
             add_snapshot(code, limit_up, limit_up, 60000)
-        elif scenario == "touched":
-            # 有 snapshot 但尚無成交開盤價時，維持 touched，不倒退用 tick。
+        elif scenario == "fallback_held":
+            # 沒有成交價，但 snapshot 買一仍鎖漲停，應 fallback 為守住。
             add_snapshot(code, None, limit_up, bids[-1])
+        elif scenario == "touched":
+            # snapshot 完全沒有成交／買賣價，才保守維持 touched。
+            add_snapshot(code, None, None, bids[-1])
         elif scenario == "none":
             add_tick(code, "09:00:01", float(prices[-1]), False, 2)
             add_snapshot(

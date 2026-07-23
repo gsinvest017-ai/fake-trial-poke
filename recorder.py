@@ -36,7 +36,7 @@ MAX_STREAM_ATTEMPTS = 600
 PREP_SECONDS = 45
 CAPACITY_EVENT_SETTLE_SECONDS = 1.5
 SUBSCRIBE_EVENT_GRACE_SECONDS = 0.01
-SNAPSHOT_AFTER_OPEN_SECONDS = 3
+SNAPSHOT_AFTER_OPEN_SECONDS = 5
 PRIORITY_CODES = (
     "2330",
     "2317",
@@ -942,13 +942,15 @@ def run_recorder(args: argparse.Namespace) -> int:
                 time.sleep(min(0.25, remaining))
             recording.clear()
 
-        if args.smoke is None and session == "preopen":
-            after_open = datetime.combine(
-                end_at.date(), datetime_time(9, 0)
-            ) + timedelta(seconds=SNAPSHOT_AFTER_OPEN_SECONDS)
-            snapshot_at = max(end_at, after_open)
+        if args.smoke is None:
+            snapshot_at = end_at + timedelta(
+                seconds=SNAPSHOT_AFTER_OPEN_SECONDS
+            )
             if datetime.now().replace(tzinfo=None) < snapshot_at:
-                wait_until(snapshot_at, "等待 09:00 後 snapshot")
+                wait_until(
+                    snapshot_at,
+                    f"等待 {end_at:%H:%M} 後 snapshot",
+                )
 
         snapshot_requested = len(universe)
         snapshot_observed_at = datetime.now().replace(tzinfo=None)
