@@ -1,195 +1,147 @@
-# 假試撮：盤前試撮鎖漲停偵測器
+# Shioaji 盤前試撮偵測器：接手人安裝手冊
 
-這套工具會在盤前把永豐 Shioaji 的「試撮成交價」和「買賣五檔」即時錄下來，再找出曾經試撮鎖漲停、但在開盤前撤掉大買單或開盤沒有守住漲停的股票。
+本專案的排程器是資料夾內的 `scheduler.py` 常駐程式，不會向 Windows 工作排程器註冊任務。整個資料夾可複製到另一台 Windows 電腦；接手人在新位置執行 `setup.bat` 後即可使用。
 
-它是市場鑑識工具，不是下單程式。程式不啟用 CA、不選交易帳號、不送單，也不會把 API key、帳號或 `person_id` 寫進輸出。
-
-## 先用白話理解
-
-「假試撮拉漲停」是指：盤前試撮時，看起來有大量買單把價格推到漲停，讓市場以為很強；但接近 09:00 時大單突然消失，或正式開盤價明顯掉離漲停。這不等於已證明操縱，只是值得人工複核的異常跡象。
-
-四種狀態：
-
-- `疑似假試撮`：盤前曾鎖漲停，而且開盤沒守住或買一大單在開盤前驟撤。
-- `鎖漲停守住`：盤前曾鎖漲停，開盤仍守在漲停，也沒有符合門檻的驟撤。
-- `曾觸漲停`：碰過漲停，但沒有形成完整鎖定證據或無法確認正式開盤。
-- `未觸及`：本次錄到的試撮資料沒有碰到漲停。
-
-## 每天會怎麼跑
+正式流程會在週一至週五台北時間 08:25 呼叫：
 
 ```text
-08:25 Windows 排程啟動
-  → recorder.py 於 08:30–09:00 錄 Tick + BidAsk
-  → scanner.py 計算每檔狀態與證據
-  → generate_dashboard.py 產生單檔、離線 dashboard.html
+run_session.py --session preopen
+  ├─ recorder.py
+  ├─ scanner.py
+  └─ generate_dashboard.py
 ```
 
-正常盤前執行：
+## 1. 系統需求
+
+- Windows 10 或 Windows 11，64 位元。
+- 64 位元 Python 3.12。此版本已在 Windows 11、Python 3.12.10 實測。
+- 第一次安裝相依套件時需要網路。
+- 可使用 Shioaji API 的永豐金證券帳號與該使用者自己的 API key／secret key。
+
+不需系統管理員權限。`scheduler.py`、`.venv`、狀態檔、log 與輸出資料都位於本專案資料夾內。
+
+## 2. 一鍵初始化
+
+1. 將整個專案資料夾複製到接手人的電腦。
+2. 雙擊 `setup.bat`。
+3. `setup.bat` 會在本資料夾建立 `.venv`，再執行 `pip install -r requirements.txt`。
+4. 若尚無 `.env`，它會從 `.env.example` 複製一份；若已有 `.env` 則不會覆寫。
+
+若畫面顯示找不到 Python，請先安裝 64 位元 Python 3.12，安裝時建議勾選「Add Python to PATH」，再重新執行 `setup.bat`。
+
+## 3. 填入接手人的 Shioaji 金鑰
+
+用文字編輯器開啟專案根目錄的 `.env`，填入接手人自己的資料：
+
+```dotenv
+SHIOAJI_API_KEY=接手人自己的_api_key
+SHIOAJI_SECRET_KEY=接手人自己的_secret_key
+```
+
+不要加多餘空格，也不要把 `.env` 上傳到 Git、寄到群組或貼到問題回報。專案的 `.gitignore` 已排除 `.env`，但仍應由人員確認交付內容。
+
+## 金鑰安全警告：交付前必讀
+
+**把資料夾交給別人以前，務必刪除自己的 `.env`；該檔含真實金鑰。**
+
+交付包只能保留不含金鑰的 `.env.example`。接手人應從 `.env.example` 建立新的 `.env`，並填入接手人自己的 Shioaji 金鑰。不要沿用、複製或傳送原持有人的金鑰。
+
+## 4. 先做離線驗證
+
+完成初始化後，可在專案資料夾開啟 PowerShell：
 
 ```powershell
-python run_session.py --session preopen
+.\.venv\Scripts\python.exe scheduler.py --dry
 ```
 
-完全不登入、先驗證整條串接：
+此命令只印出下一次平日觸發時間，不會登入 Shioaji。
+
+接著執行：
 
 ```powershell
-python run_session.py --session preopen --sample
+.\.venv\Scripts\python.exe scheduler.py --once
 ```
 
-收盤前試撮：
+`--once` 會立即呼叫 `run_session.py --session preopen --sample`，完成 scanner 與 dashboard 的離線串接驗證，不登入 Shioaji，也不改寫每日正式觸發狀態。驗證用 dashboard 會放在 `log/scheduler_once_dashboard.html`。
+
+## 5. 啟動資料夾內常駐排程
+
+雙擊 `start.bat`。它會：
+
+1. 優先使用本資料夾的 `.venv\Scripts\python.exe`。
+2. 若 `.venv` 不存在，回退到系統的 `python`。
+3. 啟動本資料夾內的 `scheduler.py` 並保持常駐。
+
+命令視窗必須保持開啟；關閉視窗或關機後，常駐排程就會停止。重新開機後可再次雙擊 `start.bat`，或使用下一節的選用自動啟動。
+
+預設排程：
+
+- 時區：Asia/Taipei（UTC+8）。
+- 日期：週一至週五。
+- 時間：08:25。
+- session：`preopen`。
+- 08:25 後才啟動時，預設可在 09:00 前補觸發；09:00 後會等下一個平日。
+- 每日只嘗試一次，記錄於 `.scheduler_state.json`。
+- `.scheduler.lock` 會防止同一資料夾同時啟動兩個常駐排程器。
+- 例外與執行結果寫入 `log/scheduler.log`；子程序失敗後排程器仍會繼續常駐。
+
+臨時調整時間可由命令列傳入：
 
 ```powershell
-python run_session.py --session preclose
+.\start.bat --at 08:20 --session preopen
 ```
 
-## 四支程式
+也可調整 `scheduler.py` 開頭的 `DEFAULT_TRIGGER_AT` 與 `DEFAULT_SESSION` 常數。若誤開第二個 `start.bat`，單一實例鎖會拒絕第二個常駐程序。
 
-### `recorder.py`
+> 此排程只判斷週一至週五，不含台灣證券交易所休市日或補班／補交易日行事曆。
+
+## 6. 開機登入後自動啟動（選用）
+
+雙擊 `install_autostart.bat`，它會在「目前使用者」的 Windows 啟動資料夾建立 `Shioaji Preopen Scheduler.lnk`，捷徑指向本資料夾內的 `start.bat`。此動作不需要系統管理員權限。
+
+這是整套可攜流程中唯一會在專案資料夾以外建立內容、也就是唯一會碰到「這台電腦」的步驟。排程邏輯、Python、狀態與 log 仍全部留在專案資料夾；捷徑只負責登入後啟動它。
+
+移除自動啟動時雙擊：
+
+```text
+uninstall_autostart.bat
+```
+
+移除程式只會刪除上述捷徑，不會刪除專案或資料。若專案資料夾改名或搬家，請先執行 `uninstall_autostart.bat`，搬移後再從新位置執行 `install_autostart.bat`。
+
+## 7. 每日產出與檔案位置
+
+- `data/auction_YYYYMMDD.jsonl`：盤前試撮原始事件。
+- `data/auction_YYYYMMDD.meta.json`：錄製 metadata。
+- `data/result_YYYYMMDD.json`：scanner 分析結果。
+- `dashboard.html`：最新的自包含離線 dashboard，可直接以瀏覽器開啟。
+- `log/`：recorder 與 scheduler 執行紀錄。
+- `.scheduler_state.json`：當日是否已觸發的資料夾內狀態檔。
+- `.scheduler.lock`：防止重複開啟常駐排程的資料夾內鎖檔。
+
+`data/`、`log/`、`.venv/`、`.env`、`.scheduler_state.json` 與 `.scheduler.lock` 都不會由 Git 追蹤。若需要把每日資料一併交接，請另外確認資料保存與個資／機敏資訊政策。
+
+## 8. 可攜性與舊排程說明
+
+- 所有執行路徑都由 `__file__`、`%~dp0` 或 `$PSScriptRoot` 推導，沒有寫死某位使用者的磁碟路徑。
+- 複製資料夾後，建議在新電腦重新執行 `setup.bat`，不要直接搬用舊電腦建立的 `.venv`。
+- 新流程不需要執行 `schedule_morning.ps1`；該檔是舊版 Windows 工作排程器流程，保留僅供既有環境辨識。新接手人應使用 `start.bat`／`scheduler.py`。
+- 若原電腦曾用舊版 `schedule_morning.ps1` 註冊工作排程，應在原電腦另行移除舊任務，避免與新常駐排程重複執行。
+
+## 9. 常見問題
+
+### `scheduler.py --once` 成功，但正式執行登入失敗
+
+`--once` 是離線 sample，不會驗證真實 Shioaji 金鑰。請檢查 `.env` 是否填入接手人自己的有效 key 與 secret，且檔名確實為 `.env`。
+
+### 雙擊 `start.bat` 後立刻關閉
+
+先執行 `setup.bat`，再於 PowerShell 執行以下命令查看錯誤：
 
 ```powershell
-python recorder.py --start 08:30 --end 09:00
-python recorder.py --smoke 15
-python recorder.py --start 08:30 --end 09:00 --out data/auction_20260724.jsonl
-python recorder.py --smoke 15 --universe 2330,2317,2454
+.\.venv\Scripts\python.exe scheduler.py --dry
 ```
 
-- 沒給 `--start/--end` 時，13:20 前預設錄 13:25–13:30；13:20 後預設下一日 08:30–09:00。
-- 可提前啟動，程式會等到時窗前再訂閱。
-- 預設 universe 是股期對應現貨；也可傳逗號清單或 UTF-8 txt/JSON。
-- Tick 與 BidAsk 都要訂，所以一檔股票會占兩條串流。
-- 撞到 Shioaji 配額時，會保留實際成功數、上限單位與完整丟棄清單，絕不靜默截斷。
-- 2026-07-23 的 15 秒 smoke 實測：第 255 條串流回報配額，因此上限為 254 條串流，也就是 127 檔完整 Tick+BidAsk；268 檔 universe 中有 141 檔被明確列入 dropped。
+### 今天不想執行
 
-### `scanner.py`
-
-```powershell
-python scanner.py --in data/auction_20260724.jsonl --out data/result_20260724.json
-python scanner.py --sample
-```
-
-預設判定：
-
-- 試撮鎖漲停：`tick.simtrade == true` 且 `chg_type == 1` 或 `price == limit_up`；或試撮五檔的買一價等於漲停。
-- 開盤價：09:00 後第一筆 `simtrade == false` 的真實 Tick；若缺少，再讀同名 `.snapshot.json`。
-- 大單驟撤：開盤前 300 秒內，買一峰值至少 1,000 張、絕對減少至少 500 張，而且相對峰值減少至少 70%。
-- `open_gap_pct = (open_price / limit_up - 1) × 100`。小於 0 代表正式開盤沒有守住盤前漲停。
-
-撤單門檻可調：
-
-```powershell
-python scanner.py --in data/auction_20260724.jsonl `
-  --drop-ratio 0.70 `
-  --drop-min-peak 1000 `
-  --drop-min-absolute 500 `
-  --drop-lookback-sec 300
-```
-
-09:00 的真實 Tick 只做事後標記，不會倒灌成盤前訊號。
-
-### `generate_dashboard.py`
-
-```powershell
-python generate_dashboard.py --in data/result_sample.json --out dashboard.html
-```
-
-產物是自包含 HTML：資料、CSS、JavaScript、SVG 圖表都內嵌，沒有 CDN、外部字型或外部網址。直接雙擊 `dashboard.html` 就能離線打開。
-
-畫面包含白話說明、當日 KPI、狀態分佈、可排序清單、全體開盤落差，以及每檔可展開的試撮價與買一堆量回放圖。狀態同時使用圖示與文字，不只靠顏色。
-
-### `run_session.py`
-
-依序執行 recorder → scanner → dashboard，任何一步非零結束就停止並回報。`--sample` 會跳過登入及即時錄製，適合安裝後或排程動作驗證。
-
-## Windows 每早自動跑
-
-用 PowerShell 在專案目錄執行：
-
-```powershell
-.\schedule_morning.ps1 -Mode Register
-```
-
-一鍵註冊並立即用 `schtasks /Run` 驗證動作本體：
-
-```powershell
-.\schedule_morning.ps1 -Mode Register -RunNow
-```
-
-排程為週一至週五 08:25。立即驗證若不在盤前啟動區間，會自動跑完全離線 sample，避免誤等到下一個交易日；正式在 08:25 觸發時會執行：
-
-```powershell
-python run_session.py --session preopen
-```
-
-查詢或再次觸發：
-
-```powershell
-.\schedule_morning.ps1 -Mode Status
-.\schedule_morning.ps1 -Mode Run
-```
-
-若要移除排程：
-
-```powershell
-.\schedule_morning.ps1 -Mode Unregister
-```
-
-腳本所有路徑都從 `$PSScriptRoot` 推導，不依賴啟動時的工作目錄。
-
-## 資料契約
-
-原始串流：`data/auction_YYYYMMDD.jsonl`，每行一筆 UTF-8 JSON：
-
-```json
-{"code":"2330","name":"台積電","ts":"2026-07-24T08:59:50","kind":"tick","simtrade":true,"price":1235.0,"chg_type":1,"bid_price":[1235.0,null,null,null,null],"bid_volume":[8200,null,null,null,null],"ask_price":[null,null,null,null,null],"ask_volume":[null,null,null,null,null],"volume":10}
-```
-
-同名 `auction_YYYYMMDD.meta.json` 保存：
-
-- 日期、session、時窗、universe 大小、成功訂閱檔數。
-- `sub_limit`（串流數）、`sub_limit_stocks`（可完整訂 Tick+BidAsk 的股票數）。
-- 被配額排除的代碼與每檔 `reference/limit_up`。
-
-掃描結果：`data/result_YYYYMMDD.json`：
-
-```json
-{
-  "date": "2026-07-24",
-  "session": "preopen",
-  "window": {"start": "08:30", "end": "09:00"},
-  "universe_size": 268,
-  "subscribed": 127,
-  "sub_limit": 254,
-  "generated_at": "2026-07-24T09:00:05+08:00",
-  "stocks": [
-    {
-      "code": "2330",
-      "name": "台積電",
-      "reference": 1125.0,
-      "limit_up": 1235.0,
-      "locked_limit_up": true,
-      "first_lock_time": "2026-07-24T08:42:10",
-      "last_lock_time": "2026-07-24T08:59:55",
-      "lock_duration_sec": 1065,
-      "sim_high": 1235.0,
-      "max_bid0_volume": 8200,
-      "chg_type_hit_1": true,
-      "open_price": 1200.0,
-      "open_gap_pct": -2.834,
-      "bid0_dropped": true,
-      "status": "suspected_fake",
-      "status_label": "疑似假試撮",
-      "sim_price_series": [{"t": "2026-07-24T08:42:10", "price": 1235.0, "simtrade": true}],
-      "bid0_series": [{"t": "2026-07-24T08:59:55", "bid0_price": 1235.0, "bid0_volume": 200}]
-    }
-  ]
-}
-```
-
-## 已知限制
-
-- Shioaji 沒有可回補的盤前試撮歷史 API；今天沒即時錄到，之後就無法完整還原。
-- 訂閱額度是帳戶/環境實測值，可能隨供應商調整；每次都以 meta 與 smoke log 的真實數字為準。
-- 若 09:00 真實 Tick 沒落在錄製尾端、也沒有 snapshot，`open_price` 會是 `null`，狀態會保守標成「曾觸漲停」，不會硬猜。
-- 「疑似假試撮」是異常偵測標籤，不是違法認定，也不是買賣建議。
-- 週一至週五排程不會自動辨識台股休市日；休市時 recorder 會因沒有正常 callback 而留下失敗記錄。
-- 本機時間必須正確。Shioaji 的 Tick 奈秒值依已驗證公式轉換，不再額外加 8 小時。
+在 08:25 前關閉常駐視窗即可。再次啟動後，只要仍在當日補觸發時窗內且 `.scheduler_state.json` 尚未記錄當日，就會執行一次。

@@ -1,4 +1,8 @@
 .env
+.venv/
+.scheduler_state.json
+.scheduler_state.json.tmp
+.scheduler.lock
 log/
 __pycache__/
 *.pyc

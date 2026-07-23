@@ -1,0 +1,6 @@
+# recorder.py 的直接第三方 imports
+shioaji==1.3.2
+pysolace==0.9.53
+
+# scanner.py 在 Windows 使用 ZoneInfo("Asia/Taipei") 所需時區資料
+tzdata==2026.2
