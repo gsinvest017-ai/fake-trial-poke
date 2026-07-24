@@ -18,6 +18,9 @@ from typing import Any
 
 
 STOCKS = {"8039": "台虹", "2392": "正崴", "2201": "裕隆"}
+POSTOPEN_START = "09:03:00"
+POSTOPEN_END_EXCLUSIVE = "09:06:00"
+POSTOPEN_LABEL = "09:03–09:05"
 
 
 def parse_args() -> argparse.Namespace:
@@ -31,6 +34,11 @@ def parse_args() -> argparse.Namespace:
         "--auction",
         type=Path,
         default=Path("data/auction_20260724.jsonl"),
+    )
+    parser.add_argument(
+        "--postopen",
+        type=Path,
+        default=Path("data/auction_20260724_postopen.jsonl"),
     )
     parser.add_argument(
         "--output",
@@ -108,10 +116,131 @@ def raw_bid_one_series(path: Path) -> tuple[dict[str, list[dict[str, Any]]], dic
     return series, raw_counts
 
 
+def postopen_bid_one_series(
+    path: Path,
+) -> tuple[dict[str, list[dict[str, Any]]], dict[str, int], dict[str, int]]:
+    series: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    raw_counts: dict[str, int] = defaultdict(int)
+    invalid_bid0_counts: dict[str, int] = defaultdict(int)
+    with path.open("r", encoding="utf-8") as handle:
+        for line_number, line in enumerate(handle, 1):
+            if not line.strip():
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"invalid post-open JSONL at line {line_number}: {exc}") from exc
+            code = str(row.get("code", ""))
+            if code not in STOCKS or row.get("kind") != "bidask":
+                continue
+            if row.get("simtrade") is not False:
+                continue
+            ts = row.get("ts")
+            if not isinstance(ts, str):
+                raise ValueError(f"post-open JSONL line {line_number} has no valid timestamp")
+            try:
+                parsed_ts = datetime.fromisoformat(ts)
+            except ValueError as exc:
+                raise ValueError(
+                    f"invalid post-open timestamp at line {line_number}: {ts}"
+                ) from exc
+            time_text = parsed_ts.strftime("%H:%M:%S.%f")
+            if not (POSTOPEN_START <= time_text < POSTOPEN_END_EXCLUSIVE):
+                continue
+
+            raw_counts[code] += 1
+            bid_price = number_at(row.get("bid_price"))
+            if bid_price is None or float(bid_price) <= 0:
+                invalid_bid0_counts[code] += 1
+                continue
+            series[code].append(
+                {
+                    "time": ts,
+                    "bid_price": float(bid_price),
+                }
+            )
+
+    for code, points in series.items():
+        points.sort(key=lambda item: item["time"])
+        # Keep the last callback for duplicate timestamps deterministically.
+        by_time = {item["time"]: item for item in points}
+        series[code] = [by_time[key] for key in sorted(by_time)]
+        times = [item["time"] for item in series[code]]
+        if times != sorted(times):
+            raise AssertionError(f"{code}: post-open series is not monotonic")
+    return series, raw_counts, invalid_bid0_counts
+
+
 def seconds_between(start: str | None, end: str | None) -> float | None:
     if not start or not end:
         return None
     return (datetime.fromisoformat(end) - datetime.fromisoformat(start)).total_seconds()
+
+
+def relative_pct(value: float, base: float) -> float:
+    if base == 0:
+        raise ValueError("relative percentage base must be non-zero")
+    return round((value / base - 1.0) * 100.0, 4)
+
+
+def build_postopen_detail(
+    code: str,
+    summary: dict[str, Any],
+    raw_series: list[dict[str, Any]],
+    raw_count: int,
+    invalid_bid0_count: int,
+) -> dict[str, Any]:
+    if not raw_series:
+        raise ValueError(f"{code}: no usable post-open bid-one series")
+    prices = [float(item["bid_price"]) for item in raw_series]
+    reference = float(summary["reference"])
+    limit_up = float(summary["limit_up"])
+    tolerance = max(1e-9, limit_up * 1e-8)
+    start_bid0 = prices[0]
+    end_bid0 = prices[-1]
+    high_bid0 = max(prices)
+    low_bid0 = min(prices)
+    returned_to_limit_up = any(
+        abs(price - limit_up) <= tolerance for price in prices
+    )
+    ever_reached_reference = any(
+        price >= reference - tolerance for price in prices
+    )
+    all_below_reference = high_bid0 < reference - tolerance
+    assessment = (
+        "觀測窗內未回漲停，且全程未回前收，買一守在低檔"
+        if not returned_to_limit_up and all_below_reference
+        else "觀測窗內曾回漲停"
+        if returned_to_limit_up
+        else "觀測窗內未回漲停，但買一曾回前收以上"
+    )
+    return {
+        "window_label": POSTOPEN_LABEL,
+        "window_start": POSTOPEN_START,
+        "window_end_exclusive": POSTOPEN_END_EXCLUSIVE,
+        "first_time": raw_series[0]["time"],
+        "last_time": raw_series[-1]["time"],
+        "start_bid0": start_bid0,
+        "end_bid0": end_bid0,
+        "high_bid0": high_bid0,
+        "low_bid0": low_bid0,
+        "returned_to_limit_up": returned_to_limit_up,
+        "ever_reached_reference_price": ever_reached_reference,
+        "all_below_reference_price": all_below_reference,
+        "start_vs_reference_pct": relative_pct(start_bid0, reference),
+        "end_vs_reference_pct": relative_pct(end_bid0, reference),
+        "high_vs_reference_pct": relative_pct(high_bid0, reference),
+        "low_vs_reference_pct": relative_pct(low_bid0, reference),
+        "start_vs_limit_up_pct": relative_pct(start_bid0, limit_up),
+        "end_vs_limit_up_pct": relative_pct(end_bid0, limit_up),
+        "high_vs_limit_up_pct": relative_pct(high_bid0, limit_up),
+        "low_vs_limit_up_pct": relative_pct(low_bid0, limit_up),
+        "raw_bidask_rows": raw_count,
+        "invalid_bid0_rows": invalid_bid0_count,
+        "series_points": len(raw_series),
+        "bid0_series": raw_series,
+        "assessment": assessment,
+    }
 
 
 def build_stock_detail(
@@ -223,12 +352,22 @@ def main() -> None:
     args = parse_args()
     detector, summaries = read_detector_summary(args.result)
     raw_series, raw_counts = raw_bid_one_series(args.auction)
+    postopen_series, postopen_counts, postopen_invalid_counts = postopen_bid_one_series(
+        args.postopen
+    )
     stocks = {}
     for code in STOCKS:
         if not raw_series.get(code):
             raise ValueError(f"{code}: no usable raw pre-open bid-one series")
         stocks[code] = build_stock_detail(
             code, summaries[code], raw_series[code], raw_counts.get(code, 0)
+        )
+        stocks[code]["postopen"] = build_postopen_detail(
+            code,
+            summaries[code],
+            postopen_series.get(code, []),
+            postopen_counts.get(code, 0),
+            postopen_invalid_counts.get(code, 0),
         )
 
     payload = {
@@ -237,8 +376,14 @@ def main() -> None:
         "source": {
             "detector_summary": str(args.result).replace("\\", "/"),
             "raw_auction": str(args.auction).replace("\\", "/"),
+            "raw_postopen": str(args.postopen).replace("\\", "/"),
             "session": detector.get("session"),
             "window": detector.get("window"),
+            "postopen_window": {
+                "start": POSTOPEN_START,
+                "end_exclusive": POSTOPEN_END_EXCLUSIVE,
+                "label": POSTOPEN_LABEL,
+            },
         },
         "availability": "available",
         "stocks": stocks,
@@ -254,7 +399,10 @@ def main() -> None:
             f"{code} {detail['name']}: {detail['limit_up_price']} -> "
             f"{detail['open_price']} ({detail['auction_to_open_gap_pct']:.2f}%), "
             f"lock {detail['lock_duration_seconds']:.1f}s, "
-            f"withdraw {detail['withdrawn_from_peak_pct']:.1f}%"
+            f"withdraw {detail['withdrawn_from_peak_pct']:.1f}%, "
+            f"post-open {detail['postopen']['start_bid0']} -> "
+            f"{detail['postopen']['end_bid0']}, "
+            f"returned limit-up={detail['postopen']['returned_to_limit_up']}"
         )
 
 

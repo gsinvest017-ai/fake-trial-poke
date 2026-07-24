@@ -291,6 +291,118 @@ def auction_svg(stock: dict[str, Any]) -> str:
     return "".join(parts)
 
 
+def postopen_svg(stock: dict[str, Any]) -> str:
+    postopen = stock.get("postopen")
+    if not isinstance(postopen, dict):
+        return placeholder_svg("開盤後買一價走勢", "未取得盤後買一資料")
+    series = postopen.get("bid0_series")
+    if not isinstance(series, list) or len(series) < 2:
+        return placeholder_svg("開盤後買一價走勢", "盤後買一資料點不足")
+
+    parsed: list[tuple[datetime, float]] = []
+    for row in series:
+        value = finite(row.get("bid_price"))
+        timestamp = row.get("time")
+        if value is None or value <= 0 or not isinstance(timestamp, str):
+            continue
+        try:
+            parsed.append((datetime.fromisoformat(timestamp), value))
+        except ValueError:
+            continue
+    if len(parsed) < 2:
+        return placeholder_svg("開盤後買一價走勢", "盤後買一有效資料點不足")
+    parsed.sort(key=lambda item: item[0])
+
+    reference = finite(stock.get("reference_price"))
+    limit_up = finite(stock.get("limit_up_price"))
+    domain = [value for _, value in parsed]
+    domain.extend(value for value in (reference, limit_up) if value is not None)
+    low, high = min(domain), max(domain)
+    padding = max((high - low) * 0.08, high * 0.006, 0.02)
+    low, high = low - padding, high + padding
+    x0, width = 66.0, 860.0
+    price_y, price_h = 40.0, 232.0
+    first_ts, last_ts = parsed[0][0], parsed[-1][0]
+    span_seconds = max((last_ts - first_ts).total_seconds(), 1e-9)
+    points = []
+    for timestamp, value in parsed:
+        x = x0 + width * (timestamp - first_ts).total_seconds() / span_seconds
+        y = price_y + price_h * (high - value) / (high - low)
+        points.append(f"{x:.1f},{y:.1f}")
+
+    parts = [
+        '<svg class="chart" viewBox="0 0 960 340" role="img" '
+        'aria-label="開盤後買一價走勢，含漲停與前收參考線">',
+        '<rect width="960" height="340" fill="#ffffff"/>',
+        '<text x="66" y="21" class="svg-title">開盤後買一價走勢（09:03–09:05）</text>',
+    ]
+    for level in range(4):
+        y = price_y + price_h * level / 3
+        value = high - (high - low) * level / 3
+        parts.append(
+            f'<line x1="{x0}" x2="{x0 + width}" y1="{y:.1f}" y2="{y:.1f}" class="grid"/>'
+            f'<text x="58" y="{y + 4:.1f}" text-anchor="end" class="svg-axis">{fmt_price(value)}</text>'
+        )
+    for value, color, label in (
+        (limit_up, "#dc2626", "漲停"),
+        (reference, "#1d4ed8", "前收"),
+    ):
+        if value is None:
+            continue
+        y = price_y + price_h * (high - value) / (high - low)
+        parts.append(
+            f'<line x1="{x0}" x2="{x0 + width}" y1="{y:.1f}" y2="{y:.1f}" '
+            f'stroke="{color}" stroke-width="1.6" stroke-dasharray="7 5"/>'
+            f'<text x="{x0 + width - 4}" y="{y - 6:.1f}" text-anchor="end" '
+            f'fill="{color}" class="svg-axis">{label} {fmt_price(value)}</text>'
+        )
+    parts.append(
+        f'<polyline points="{" ".join(points)}" fill="none" stroke="#0f766e" '
+        'stroke-width="2.6" stroke-linejoin="round" stroke-linecap="round"/>'
+    )
+    for timestamp, value, label in (
+        (parsed[0][0], parsed[0][1], "起"),
+        (parsed[-1][0], parsed[-1][1], "訖"),
+    ):
+        x = x0 + width * (timestamp - first_ts).total_seconds() / span_seconds
+        y = price_y + price_h * (high - value) / (high - low)
+        anchor = "start" if label == "起" else "end"
+        dx = 7 if label == "起" else -7
+        parts.append(
+            f'<circle cx="{x:.1f}" cy="{y:.1f}" r="3.8" fill="#0f766e"/>'
+            f'<text x="{x + dx:.1f}" y="{y - 8:.1f}" text-anchor="{anchor}" '
+            f'class="svg-axis">{label} {fmt_price(value)}</text>'
+        )
+    parts.extend(
+        [
+            f'<text x="{x0}" y="322" class="svg-axis">{esc(first_ts.strftime("%H:%M:%S"))}</text>',
+            f'<text x="{x0 + width}" y="322" text-anchor="end" class="svg-axis">{esc(last_ts.strftime("%H:%M:%S"))}</text>',
+            "</svg>",
+        ]
+    )
+    return "".join(parts)
+
+
+def postopen_fact(stock: dict[str, Any]) -> str:
+    postopen = stock.get("postopen")
+    if not isinstance(postopen, dict):
+        return "09:03–09:05 開盤後買一資料未取得。"
+    returned = postopen.get("returned_to_limit_up") is True
+    reference_state = (
+        "全程未回前收"
+        if postopen.get("all_below_reference_price") is True
+        else "曾回前收以上"
+    )
+    return (
+        f"09:03–09:05 買一價 {fmt_price(postopen.get('start_bid0'))} → "
+        f"{fmt_price(postopen.get('end_bid0'))} 元，區間 "
+        f"{fmt_price(postopen.get('low_bid0'))}–{fmt_price(postopen.get('high_bid0'))} 元；"
+        f"高點相對前收 {signed(postopen.get('high_vs_reference_pct'), 2, '%')}、"
+        f"相對漲停 {signed(postopen.get('high_vs_limit_up_pct'), 2, '%')}。"
+        f"觀測窗內{'曾回' if returned else '未回'}漲停，且{reference_state}。"
+    )
+
+
 def margin_svg(stock: dict[str, Any]) -> str:
     series = stock.get("series")
     if stock.get("availability") != "available" or not isinstance(series, list) or len(series) < 2:
@@ -607,9 +719,11 @@ def evidence_and_verdict(
         else None
     )
     regime = auditable_market_label(market)
+    postopen_fact_text = postopen_fact(auction)
     evidence = [
         f"試撮漲停 {fmt_price(auction.get('limit_up_price'))} 元至開盤 {fmt_price(open_price)} 元，落差 {signed(gap, 2, '%')}；相對前一日收盤實際開盤 {signed(real_open_gap, 2, '%')}。",
         f"鎖漲停約 {fmt_num(auction.get('lock_duration_seconds'), 1)} 秒；鎖單高峰至末筆縮減 {fmt_num(withdrawal, 1)}%，撤減張數約為 20 日均量的 {fmt_num(withdrawal_vs_average_volume, 2)}%，判定為「{auction.get('withdrawal_assessment', '未取得')}」。",
+        postopen_fact_text,
         f"20 日報酬 {signed(return20, 2, '%')}、量比 {fmt_num(volume_ratio, 3)}，技術狀態為「{ksum.get('trend', '未取得')}」。",
         f"融資 20 日變化 {signed(m20, 2, '%')}；最新使用率 {fmt_num(mlatest.get('margin_utilization_pct'), 2)}%、券資比 {fmt_num(mlatest.get('short_margin_ratio_pct'), 2)}%。",
         f"三大法人 5 日合計 {signed(total5, 1)} 張、20 日合計 {signed(total20, 1)} 張；其中外資 5 日 {signed(foreign5, 1)} 張。",
@@ -673,6 +787,9 @@ def evidence_and_verdict(
             f"雖撤減比例很高，撤減張數僅約 20 日均量 {fmt_num(withdrawal_vs_average_volume, 2)}%，"
             "經濟量體小。縮量也可能只是供給收斂，須由後續真實成交確認。"
         )
+    conclusion = (
+        f"{conclusion} 開盤後買一補充證據顯示：{postopen_fact_text}"
+    )
     return {
         "title": title,
         "tone": tone,
@@ -712,6 +829,10 @@ def render_stock(
     industry_text = "、".join(industries) if industries else "未取得"
     liquidity = liquidity_assessment(kbar)
     verdict = evidence_and_verdict(code, auction, kbar, margin, chips, market, liquidity)
+    postopen = auction.get("postopen")
+    if not isinstance(postopen, dict):
+        raise ValueError(f"auction: missing postopen detail for {code}")
+    postopen_fact_text = postopen_fact(auction)
     open_price = finite(auction.get("open_price"))
     latest_close = finite(ksum.get("latest_adjusted_close"))
     disposition = chips.get("disposition", {})
@@ -772,6 +893,20 @@ def render_stock(
         f'<div class="callout"><strong>判讀</strong><br>{esc(auction.get("withdrawal_reason", "未取得"))}<br><br>'
         "此判定是買一價量行為跡象，不是交易所委託序號層級的違規認定。</div></div>",
         f'<figure>{auction_svg(auction)}<figcaption>來源：本機盤前 recorder 原始 bidask 事件；買一量單位為張。</figcaption></figure>',
+        '<div class="postopen-section">',
+        '<h4>開盤後走勢（09:03–09:05）</h4>',
+        '<div class="two-col"><div><table class="data-table"><tbody>',
+        f'<tr><th>觀測首筆／末筆</th><td>{esc(str(postopen.get("first_time", "未取得"))[11:19])} ／ {esc(str(postopen.get("last_time", "未取得"))[11:19])}</td></tr>',
+        f'<tr><th>買一價起 → 訖</th><td>{fmt_price(postopen.get("start_bid0"))} → {fmt_price(postopen.get("end_bid0"))} 元</td></tr>',
+        f'<tr><th>區間低 → 高</th><td>{fmt_price(postopen.get("low_bid0"))} → {fmt_price(postopen.get("high_bid0"))} 元</td></tr>',
+        f'<tr><th>是否回漲停</th><td><strong class="{"positive" if postopen.get("returned_to_limit_up") is True else "negative"}">{"是" if postopen.get("returned_to_limit_up") is True else "否（未回漲停）"}</strong></td></tr>',
+        f'<tr><th>高點 vs 前收</th><td>{signed(postopen.get("high_vs_reference_pct"), 2, "%")}</td></tr>',
+        f'<tr><th>高點 vs 漲停</th><td>{signed(postopen.get("high_vs_limit_up_pct"), 2, "%")}</td></tr>',
+        f'<tr><th>有效點／排除無效 bid0</th><td>{fmt_num(postopen.get("series_points"), 0)}／{fmt_num(postopen.get("invalid_bid0_rows"), 0)} 筆</td></tr>',
+        '</tbody></table></div>',
+        f'<div class="callout"><strong>盤後事實</strong><br>{esc(postopen.get("assessment", "未取得"))}。<br><br>{esc(postopen_fact_text)}</div></div>',
+        f'<figure>{postopen_svg(auction)}<figcaption>來源：data/auction_20260724_postopen.jsonl 的非試撮 bidask；只取 09:03–09:05 正數 bid0，圖中含前收與漲停參考線。</figcaption></figure>',
+        "</div>",
         "</div></div>",
         '<div class="analysis-block">',
         '<div class="block-number">02</div><div><h3>日 K 位置與還原均線</h3>',
@@ -890,6 +1025,8 @@ def css() -> str:
       grid-template-columns:1fr 1fr;gap:18px}.callout,.decision-box,.counter-box{border-radius:10px;
       padding:15px 17px;background:#f8fafc;border:1px solid var(--line)}.decision-box{background:#f0fdfa;
       border-color:#99f6e4;margin-top:16px}.counter-box{background:#fffbeb;border-color:#fde68a;margin-top:10px}
+    .postopen-section{margin-top:26px;padding-top:22px;border-top:1px dashed #cbd5e1}
+    .postopen-section h4{font-size:17px;margin:0 0 14px;color:#0f766e}
     figure{margin:20px 0 4px}.chart,.market-chart{display:block;width:100%;height:auto;border:1px solid var(--line);
       border-radius:10px;background:#fff}.svg-title{font:700 13px "Microsoft JhengHei",Arial;fill:#334155}
     .svg-axis{font:11px "Microsoft JhengHei",Arial;fill:#64748b}.svg-muted{font:13px "Microsoft JhengHei",Arial;
@@ -927,7 +1064,9 @@ def main() -> None:
         stock_or_error(kbars, code, "kbars")
         stock_or_error(margin, code, "margin")
         stock_or_error(chips, code, "chips")
-        stock_or_error(auction, code, "auction")
+        auction_stock = stock_or_error(auction, code, "auction")
+        if not isinstance(auction_stock.get("postopen"), dict):
+            raise ValueError(f"auction: missing postopen detail for {code}")
 
     sections = []
     verdicts: dict[str, dict[str, Any]] = {}
@@ -983,8 +1122,8 @@ def main() -> None:
   <header class="hero">
     <div class="eyebrow">PRE-OPEN AUCTION RESEARCH · 2026-07-24</div>
     <h1>疑似假試撮重點股票完整分析</h1>
-    <p class="subtitle">只分析盤前偵測出的 3 檔重點股：8039 台虹、2392 正崴、2201 裕隆。以原始試撮價量、還原日 K、量能、融資融券、三大法人與大盤位置建立可稽核的證據鏈。</p>
-    <span class="asof">事件日 2026-07-24 · 盤後資料截止 2026-07-23</span>
+    <p class="subtitle">只分析盤前偵測出的 3 檔重點股：8039 台虹、2392 正崴、2201 裕隆。以原始試撮價量、09:03–09:05 開盤後買一、還原日 K、量能、融資融券、三大法人與大盤位置建立可稽核的證據鏈。</p>
+    <span class="asof">事件日 2026-07-24 · 開盤後觀測至 09:05 · 完整盤後資料截止 2026-07-23</span>
   </header>
   <nav class="nav" aria-label="報告導覽">
     <a href="#overview">大盤與總覽</a><a href="#stock-8039">8039 台虹</a>
@@ -1015,7 +1154,7 @@ def main() -> None:
     <div class="section-kicker">METHOD & LIMITATIONS</div>
     <h2>方法、資料血統與未取得項目</h2>
     <div class="method-grid">
-      <div class="method-card"><strong>Point-in-time</strong><br>日 K、融資與法人只用至 2026-07-23 的完整盤後資料；2026-07-24 僅使用 recorder 已記錄的盤前試撮與實際開盤，未混入未完成日 K。</div>
+      <div class="method-card"><strong>Point-in-time</strong><br>日 K、融資與法人只用至 2026-07-23 的完整盤後資料；2026-07-24 使用 recorder 已記錄的盤前試撮、實際開盤與 09:03–09:05 非試撮 bidask，未混入未完成日 K。</div>
       <div class="method-card"><strong>還原權值</strong><br>{esc(kbars.get("methodology", {}).get("stock_adjustment", "未取得"))}</div>
       <div class="method-card"><strong>快取與重跑</strong><br>FinMind／Yahoo 每個 response 分檔快取於 data/analysis/cache；重跑優先讀快取。FinMind 402 採指數退避，不用空資料或猜測值補洞。</div>
       <div class="method-card"><strong>撤單證據</strong><br>以鎖漲停期間買一量高峰至末筆縮減，且其後買一離開漲停價作行為判定；不是委託序號級稽核，也不等同法律結論。</div>
@@ -1023,7 +1162,7 @@ def main() -> None:
     <h3 style="margin-top:24px">明確未取得</h3>
     <ul>{''.join(f'<li>{esc(item)}</li>' for item in unavailable)}</ul>
     <h3 style="margin-top:24px">來源檔</h3>
-    <p>本機 recorder：data/result_20260724.json、data/auction_20260724.jsonl。分析輸入：kbars.json、margin.json、chips.json、auction_detail.json。市場資料供應者名稱：FinMind、Yahoo Finance、臺灣證券交易所口徑。</p>
+    <p>本機 recorder：data/result_20260724.json、data/auction_20260724.jsonl、data/auction_20260724_postopen.jsonl。分析輸入：kbars.json、margin.json、chips.json、auction_detail.json。市場資料供應者名稱：FinMind、Yahoo Finance、臺灣證券交易所口徑。</p>
     <p><strong>用途限制：</strong>這是研究與風險辨識報告，不是投資建議。7/24 當日後續成交、公告與盤後籌碼尚不在本報告資訊集內。</p>
   </section>
   <footer class="footer">離線自包含報告 · 無外部腳本、字型、樣式表或圖片連結 · 產生時間 {esc(generated)}</footer>
