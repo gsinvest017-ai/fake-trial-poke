@@ -49,6 +49,37 @@ SHIOAJI_SECRET_KEY=接手人自己的_secret_key
 
 > 目前的日期判斷以平日為主，不包含台灣證券交易所休市日或補交易日行事曆。
 
+### Live 自動錄製與誠實狀態
+
+Live 模式預設會將送進偵測器的每一筆 `bidask`、`tick`、`snapshot` 原始事件，同步寫入相對於 `service.py` 的 `data\auction_YYYYMMDD.jsonl`。窗口結束後另寫同名的 `.meta.json`，保存 session、window、universe、實際訂閱數，以及每檔股票的 `limit_up`。這些檔案可供後續 replay、`scanner.py` 掃描與分析，不會因即時窗口結束而遺失。
+
+如明確不需要落地，可用 `--no-record` 關閉：
+
+```powershell
+python service.py --no-record
+```
+
+Replay 模式預設只讀取既有檔案，不會再次寫入或覆蓋錄製檔。只有明確提供 `--record-out` 才會把 replay 事件另存到指定路徑；例如可寫入系統暫存目錄，再交給 scanner 驗證：
+
+```powershell
+python service.py --replay data\auction_YYYYMMDD.jsonl --speed 50 --record-out "$env:TEMP\live_rec.jsonl"
+python scanner.py --in "$env:TEMP\live_rec.jsonl" --out "$env:TEMP\live_rec_result.json"
+```
+
+完成 replay 後可按 `Ctrl+C` 停止服務。要在不登入 Shioaji、也不碰 `data\` 的情況下自動驗證錄製 schema、scanner/replay 相容性與狀態契約，也可直接執行：
+
+```powershell
+python tests\test_service_record.py
+```
+
+網頁與 `/api/state` 顯示的是實際連線與資料流狀況，不是固定文案：
+
+- `live`：登入成功、實際訂閱完成，而且窗口內持續收到真實市場事件。
+- `degraded`：已登入並訂閱，但窗口內超過容許秒數沒有新事件，代表資料可能停流；預設門檻為 10 秒，可用 `--stale-after-sec` 調整。
+- `error`：登入失敗或實際訂閱未達應訂閱檔數。
+
+`/api/state` 同時提供 `recording`、`record_path`、`record_count`、`last_event_age_sec`、`login_ok`、`subscribe_ok`，可直接確認是否正在錄製、已落地筆數、最後事件距今秒數，以及登入／訂閱是否成功。窗口外仍可能顯示 `idle`、`armed`、`closed`；Replay 則顯示 `replay`。
+
 ## 4. Replay 離線測試
 
 Replay 模式會讀取既有的試撮 JSONL，不登入 Shioaji。請在專案資料夾開啟 PowerShell，執行：

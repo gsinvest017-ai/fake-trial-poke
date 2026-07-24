@@ -155,9 +155,19 @@
     }
 
     .service-dot.live {
-      background: var(--fake);
-      box-shadow: 0 0 0 2px var(--fake), 0 0 0 7px rgba(200, 50, 42, 0.1);
+      background: var(--touched);
+      box-shadow: 0 0 0 2px var(--touched), 0 0 0 7px rgba(47, 125, 91, 0.1);
       animation: breathe 1.8s ease-in-out infinite;
+    }
+
+    .service-dot.degraded {
+      background: var(--held);
+      box-shadow: 0 0 0 2px var(--held), 0 0 0 7px rgba(183, 117, 20, 0.12);
+    }
+
+    .service-dot.error {
+      background: var(--fake);
+      box-shadow: 0 0 0 2px var(--fake), 0 0 0 7px rgba(200, 50, 42, 0.14);
     }
 
     .service-dot.armed {
@@ -172,8 +182,34 @@
 
     @keyframes breathe {
       50% {
-        box-shadow: 0 0 0 2px var(--fake), 0 0 0 11px rgba(200, 50, 42, 0);
+        box-shadow: 0 0 0 2px var(--touched), 0 0 0 11px rgba(47, 125, 91, 0);
       }
+    }
+
+    .status-primary.live {
+      background: rgba(228, 241, 234, 0.72);
+    }
+
+    .status-primary.degraded {
+      background: rgba(248, 238, 219, 0.88);
+      box-shadow: inset 4px 0 0 var(--held);
+    }
+
+    .status-primary.error {
+      background: rgba(251, 233, 229, 0.94);
+      box-shadow: inset 4px 0 0 var(--fake);
+    }
+
+    .status-primary.live .service-state-text {
+      color: var(--touched);
+    }
+
+    .status-primary.degraded .service-state-text {
+      color: #936012;
+    }
+
+    .status-primary.error .service-state-text {
+      color: var(--fake);
     }
 
     @media (prefers-reduced-motion: reduce) {
@@ -225,6 +261,124 @@
 
     .count-watching .count-value {
       color: var(--watching);
+    }
+
+    .health-strip {
+      display: grid;
+      grid-template-columns: minmax(260px, 1.4fr) repeat(3, minmax(150px, 0.75fr));
+      min-width: 0;
+      margin-bottom: 18px;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: var(--radius-lg);
+      background: rgba(255, 255, 255, 0.76);
+      box-shadow: 0 8px 22px rgba(55, 44, 25, 0.05);
+    }
+
+    .health-cell {
+      min-width: 0;
+      padding: 12px 16px;
+      border-right: 1px solid var(--line);
+    }
+
+    .health-cell:last-child {
+      border-right: 0;
+    }
+
+    .health-value {
+      min-width: 0;
+      color: var(--ink);
+      font-size: 0.94rem;
+      font-weight: 800;
+    }
+
+    .recording-line,
+    .broker-health {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 7px;
+    }
+
+    .recording-cell.active {
+      background: rgba(251, 233, 229, 0.58);
+    }
+
+    .recording-cell.active .recording-line {
+      color: var(--fake);
+    }
+
+    .recording-dot {
+      width: 9px;
+      height: 9px;
+      flex: 0 0 auto;
+      border-radius: 999px;
+      background: var(--watching);
+    }
+
+    .recording-dot.active {
+      background: var(--fake);
+      box-shadow: 0 0 0 5px rgba(200, 50, 42, 0.1);
+      animation: record-pulse 1.25s ease-in-out infinite;
+    }
+
+    @keyframes record-pulse {
+      50% {
+        opacity: 0.45;
+      }
+    }
+
+    .record-path {
+      min-width: 0;
+      margin-top: 2px;
+      overflow: hidden;
+      color: var(--muted);
+      font-size: 0.66rem;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .telemetry-count {
+      font-family: Georgia, ui-serif, serif;
+      font-size: 1.28rem;
+      line-height: 1.1;
+    }
+
+    .event-age.fresh {
+      color: var(--touched);
+    }
+
+    .event-age.stale {
+      color: #936012;
+    }
+
+    .event-age.missing {
+      color: var(--fake);
+    }
+
+    .health-badge {
+      display: inline-flex;
+      align-items: center;
+      min-height: 24px;
+      padding: 3px 8px;
+      border: 1px solid var(--line-strong);
+      border-radius: 999px;
+      background: var(--watching-soft);
+      color: #5F594F;
+      font-size: 0.69rem;
+      white-space: nowrap;
+    }
+
+    .health-badge.ok {
+      border-color: rgba(47, 125, 91, 0.3);
+      background: var(--touched-soft);
+      color: var(--touched);
+    }
+
+    .health-badge.bad {
+      border-color: rgba(200, 50, 42, 0.3);
+      background: var(--fake-soft);
+      color: var(--fake);
     }
 
     .content-layout {
@@ -569,6 +723,14 @@
       background: var(--fake);
     }
 
+    .connection-note.warning::before {
+      background: var(--held);
+    }
+
+    .connection-note.error::before {
+      background: var(--fake);
+    }
+
     @media (max-width: 1160px) {
       .status-strip {
         grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -590,6 +752,18 @@
 
       .stock-grid {
         grid-template-columns: minmax(0, 1fr);
+      }
+
+      .health-strip {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+
+      .health-cell:nth-child(2) {
+        border-right: 0;
+      }
+
+      .health-cell:nth-child(-n + 2) {
+        border-bottom: 1px solid var(--line);
       }
     }
 
@@ -642,6 +816,20 @@
       .status-cell:nth-child(3),
       .status-cell:nth-child(4) {
         border-bottom: 1px solid var(--line);
+      }
+
+      .health-strip {
+        grid-template-columns: minmax(0, 1fr);
+      }
+
+      .health-cell,
+      .health-cell:nth-child(2) {
+        border-right: 0;
+        border-bottom: 1px solid var(--line);
+      }
+
+      .health-cell:last-child {
+        border-bottom: 0;
       }
 
       .panel {
@@ -715,11 +903,11 @@
     </header>
 
     <section class="status-strip" aria-label="服務與偵測統計">
-      <div class="status-cell status-primary">
+      <div class="status-cell status-primary" id="status-primary">
         <span class="service-dot" id="service-dot" aria-hidden="true"></span>
         <div>
           <div class="cell-label">服務狀態</div>
-          <div class="cell-value" id="service-status">讀取中</div>
+          <div class="cell-value service-state-text" id="service-status">讀取中</div>
         </div>
       </div>
       <div class="status-cell next-window">
@@ -741,6 +929,32 @@
       <div class="status-cell count-watching">
         <div class="cell-label">觀察中</div>
         <div class="cell-value count-value" id="count-watching">0</div>
+      </div>
+    </section>
+
+    <section class="health-strip" aria-label="資料流與錄製狀態">
+      <div class="health-cell recording-cell" id="recording-cell">
+        <div class="cell-label">原始事件落地</div>
+        <div class="health-value recording-line">
+          <span id="recording-status">狀態讀取中</span>
+          <span class="recording-dot" id="recording-dot" aria-hidden="true"></span>
+        </div>
+        <div class="record-path" id="record-path" title="">—</div>
+      </div>
+      <div class="health-cell">
+        <div class="cell-label">已記錄事件</div>
+        <div class="health-value telemetry-count" id="record-count">0</div>
+      </div>
+      <div class="health-cell">
+        <div class="cell-label">最後市場事件距今</div>
+        <div class="health-value event-age" id="last-event-age">尚無資料</div>
+      </div>
+      <div class="health-cell">
+        <div class="cell-label">登入／訂閱實況</div>
+        <div class="health-value broker-health">
+          <span class="health-badge" id="login-status">登入 —</span>
+          <span class="health-badge" id="subscribe-status">訂閱 —</span>
+        </div>
       </div>
     </section>
 
@@ -797,12 +1011,15 @@
         idle: "待命",
         armed: "已上線・等待窗口",
         live: "試撮進行中",
+        degraded: "資料停流・服務降級",
+        error: "服務異常",
         closed: "已收盤",
         replay: "歷史資料回放"
       };
 
       const elements = {
         clock: document.getElementById("clock"),
+        statusPrimary: document.getElementById("status-primary"),
         serviceDot: document.getElementById("service-dot"),
         serviceStatus: document.getElementById("service-status"),
         windowLabel: document.getElementById("window-label"),
@@ -811,6 +1028,14 @@
         countHeld: document.getElementById("count-held"),
         countTouched: document.getElementById("count-touched"),
         countWatching: document.getElementById("count-watching"),
+        recordingCell: document.getElementById("recording-cell"),
+        recordingStatus: document.getElementById("recording-status"),
+        recordingDot: document.getElementById("recording-dot"),
+        recordPath: document.getElementById("record-path"),
+        recordCount: document.getElementById("record-count"),
+        lastEventAge: document.getElementById("last-event-age"),
+        loginStatus: document.getElementById("login-status"),
+        subscribeStatus: document.getElementById("subscribe-status"),
         stockSummary: document.getElementById("stock-summary"),
         connectionNote: document.getElementById("connection-note"),
         stockGrid: document.getElementById("stock-grid"),
@@ -893,11 +1118,14 @@
         elements.clock.textContent = timeFormatter.format(new Date());
         if (!currentState) return;
 
-        const isLive = currentState.service_status === "live";
+        const service = currentState.service_status;
         const next = countdown(currentState.next_window_at);
         const windowValue = currentState.window || {};
-        elements.windowLabel.textContent = isLive ? "本次偵測窗口" : "距下次偵測窗口";
-        elements.nextWindow.textContent = isLive
+        const hasCurrentWindow = ["live", "degraded", "error"].includes(service)
+          && windowValue.start
+          && windowValue.end;
+        elements.windowLabel.textContent = hasCurrentWindow ? "本次偵測窗口" : "距下次偵測窗口";
+        elements.nextWindow.textContent = hasCurrentWindow
           ? `${safeText(windowValue.start)}–${safeText(windowValue.end)}`
           : (next || safeText(currentState.next_window_at));
       }
@@ -1126,6 +1354,71 @@
         element.textContent = numberFormatter.format(count === null ? 0 : count);
       }
 
+      function serviceLabel(service, state) {
+        if (service === "error") {
+          if (state.login_ok === false) return "服務異常・登入失敗";
+          if (state.subscribe_ok === false) return "服務異常・訂閱失敗";
+        }
+        return SERVICE[service] || service;
+      }
+
+      function formatEventAge(value) {
+        if (value === null || value === undefined || value === "") return "尚無資料";
+        const age = finiteNumber(value);
+        if (age === null) return "尚無資料";
+        const seconds = Math.max(0, Math.floor(age));
+        if (seconds < 60) return `${numberFormatter.format(seconds)} 秒`;
+        const minutes = Math.floor(seconds / 60);
+        const remainder = seconds % 60;
+        if (minutes < 60) {
+          return `${numberFormatter.format(minutes)} 分 ${numberFormatter.format(remainder)} 秒`;
+        }
+        const hours = Math.floor(minutes / 60);
+        return `${numberFormatter.format(hours)} 小時 ${numberFormatter.format(minutes % 60)} 分`;
+      }
+
+      function updateHealthBadge(element, label, value) {
+        if (value === true) {
+          element.textContent = `${label} ✓`;
+          element.className = "health-badge ok";
+          return;
+        }
+        if (value === false) {
+          element.textContent = `${label} ✕`;
+          element.className = "health-badge bad";
+          return;
+        }
+        element.textContent = `${label} —`;
+        element.className = "health-badge";
+      }
+
+      function renderHealth(state, service) {
+        const recording = state.recording === true;
+        const recordPath = safeText(state.record_path);
+        const rawEventAge = state.last_event_age_sec;
+        const eventAge = rawEventAge === null || rawEventAge === undefined || rawEventAge === ""
+          ? null
+          : finiteNumber(rawEventAge);
+
+        elements.recordingCell.className = `health-cell recording-cell${recording ? " active" : ""}`;
+        elements.recordingStatus.textContent = recording ? "錄製中" : "未錄製";
+        elements.recordingDot.className = `recording-dot${recording ? " active" : ""}`;
+        elements.recordPath.textContent = recordPath;
+        elements.recordPath.title = recordPath === "—" ? "" : recordPath;
+        setCount(elements.recordCount, state.record_count);
+        elements.lastEventAge.textContent = formatEventAge(eventAge);
+        elements.lastEventAge.className = "health-value event-age";
+        if (eventAge === null) {
+          elements.lastEventAge.classList.add("missing");
+        } else if (service === "degraded" || service === "error") {
+          elements.lastEventAge.classList.add("stale");
+        } else {
+          elements.lastEventAge.classList.add("fresh");
+        }
+        updateHealthBadge(elements.loginStatus, "登入", state.login_ok);
+        updateHealthBadge(elements.subscribeStatus, "訂閱", state.subscribe_ok);
+      }
+
       function renderState(state) {
         currentState = state;
         const service = safeText(state.service_status, "idle");
@@ -1135,27 +1428,49 @@
         const universe = finiteNumber(state.universe) ?? stocks.length;
         const subscribed = finiteNumber(state.subscribed) ?? 0;
 
-        elements.serviceStatus.textContent = SERVICE[service] || service;
+        elements.statusPrimary.className = `status-cell status-primary ${service}`;
+        elements.serviceStatus.textContent = serviceLabel(service, state);
         elements.serviceDot.className = `service-dot ${service}`;
         elements.serviceDot.setAttribute("aria-label", elements.serviceStatus.textContent);
+        renderHealth(state, service);
         setCount(elements.countFake, counts.suspected_fake);
         setCount(elements.countHeld, counts.locked_held);
         setCount(elements.countTouched, counts.touched);
         setCount(elements.countWatching, counts.watching);
         elements.stockSummary.textContent =
           `標的 ${numberFormatter.format(universe)} 檔・已訂閱 ${numberFormatter.format(subscribed)} 檔`;
-        elements.connectionNote.textContent = "每秒更新";
-        elements.connectionNote.classList.remove("offline");
+        if (service === "error") {
+          elements.connectionNote.textContent = "API 已連線・服務異常";
+          elements.connectionNote.className = "connection-note error";
+        } else if (service === "degraded") {
+          elements.connectionNote.textContent = "API 已連線・資料停流";
+          elements.connectionNote.className = "connection-note warning";
+        } else {
+          elements.connectionNote.textContent = "API 已連線・每秒更新";
+          elements.connectionNote.className = "connection-note";
+        }
         renderStocks(stocks);
         renderAlerts(alerts);
         updateClock();
       }
 
       function showConnectionError() {
+        currentState = null;
+        elements.statusPrimary.className = "status-cell status-primary error";
         elements.serviceStatus.textContent = "連線中斷・正在重試";
-        elements.serviceDot.className = "service-dot";
+        elements.serviceDot.className = "service-dot error";
+        elements.recordingCell.className = "health-cell recording-cell";
+        elements.recordingStatus.textContent = "錄製狀態未知";
+        elements.recordingDot.className = "recording-dot";
+        elements.recordPath.textContent = "無法確認";
+        elements.recordPath.title = "";
+        elements.recordCount.textContent = "—";
+        elements.lastEventAge.textContent = "無法確認";
+        elements.lastEventAge.className = "health-value event-age missing";
+        updateHealthBadge(elements.loginStatus, "登入", null);
+        updateHealthBadge(elements.subscribeStatus, "訂閱", null);
         elements.connectionNote.textContent = "暫時未連線";
-        elements.connectionNote.classList.add("offline");
+        elements.connectionNote.className = "connection-note offline";
       }
 
       async function pollState() {

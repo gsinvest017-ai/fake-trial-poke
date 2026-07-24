@@ -18,6 +18,7 @@ import argparse
 import copy
 import json
 import os
+import queue
 import signal
 import sys
 import threading
@@ -41,6 +42,7 @@ SNAPSHOT_AFTER_END_SECONDS = 5
 PUBLISH_INTERVAL_SECONDS = 0.2
 SUBSCRIBE_EVENT_GRACE_SECONDS = 0.01
 LOGIN_RETRY_SECONDS = 30.0
+DEFAULT_STALE_AFTER_SECONDS = 10.0
 
 
 def _default_port() -> int:
@@ -188,6 +190,12 @@ def empty_state(
         "next_window_at": next_window_at,
         "universe": 0,
         "subscribed": 0,
+        "recording": False,
+        "record_path": None,
+        "record_count": 0,
+        "last_event_age_sec": None,
+        "login_ok": False,
+        "subscribe_ok": False,
         "counts": {
             "suspected_fake": 0,
             "locked_held": 0,
@@ -197,6 +205,106 @@ def empty_state(
         "stocks": [],
         "alerts": [],
     }
+
+
+class ServiceJsonlWriter:
+    """以單一背景執行緒依序落地 recorder 相容的 UTF-8 JSONL。"""
+
+    _STOP = object()
+
+    def __init__(self, path: Path, *, append: bool = False) -> None:
+        self.path = path
+        self.append = append
+        self._items: queue.Queue[dict[str, Any] | object] = queue.Queue()
+        self._lock = threading.Lock()
+        self._count = 0
+        self._handle: Any | None = None
+        self.error: BaseException | None = None
+        self._started = False
+        self._closed = False
+        self._thread = threading.Thread(
+            target=self._run,
+            name="auction-service-jsonl-writer",
+            daemon=True,
+        )
+
+    @property
+    def count(self) -> int:
+        with self._lock:
+            return self._count
+
+    @property
+    def active(self) -> bool:
+        return (
+            self._started
+            and not self._closed
+            and self.error is None
+            and self._thread.is_alive()
+        )
+
+    def start(self) -> None:
+        if self._started:
+            raise RuntimeError("JSONL writer 已啟動")
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        mode = "a" if self.append else "w"
+        # 先在呼叫端同步開檔，讓路徑/權限錯誤不會被背景執行緒吞掉。
+        self._handle = self.path.open(
+            mode,
+            encoding="utf-8",
+            newline="\n",
+        )
+        self._started = True
+        self._thread.start()
+
+    def put(self, record: dict[str, Any]) -> None:
+        if not self._started or self._closed:
+            raise RuntimeError("JSONL writer 未啟動或已關閉")
+        if self.error is not None:
+            raise RuntimeError("JSONL writer 已失效") from self.error
+        self._items.put(copy.deepcopy(record))
+
+    def close(self) -> None:
+        if not self._started or self._closed:
+            return
+        self._closed = True
+        self._items.put(self._STOP)
+        self._thread.join()
+
+    def _run(self) -> None:
+        handle = self._handle
+        if handle is None:  # pragma: no cover - start() 已保證
+            self.error = RuntimeError("JSONL writer 缺少檔案 handle")
+            return
+        try:
+            while True:
+                item = self._items.get()
+                if item is self._STOP:
+                    break
+                handle.write(json.dumps(item, ensure_ascii=False) + "\n")
+                handle.flush()
+                with self._lock:
+                    self._count += 1
+        except BaseException as exc:  # pragma: no cover - 磁碟/權限防禦
+            self.error = exc
+        finally:
+            try:
+                handle.close()
+            except BaseException as exc:  # pragma: no cover - 關檔防禦
+                if self.error is None:
+                    self.error = exc
+
+
+def write_record_metadata(
+    record_path: Path,
+    metadata: dict[str, Any],
+) -> Path:
+    """寫 recorder/scanner 共用的同名 .meta.json sidecar。"""
+    meta_path = record_path.with_suffix(".meta.json")
+    meta_path.parent.mkdir(parents=True, exist_ok=True)
+    with meta_path.open("w", encoding="utf-8", newline="\n") as handle:
+        json.dump(metadata, handle, ensure_ascii=False, indent=2)
+        handle.write("\n")
+    return meta_path
 
 
 class SharedState:
@@ -230,6 +338,9 @@ class ServiceRuntime:
         window_start: str,
         window_end: str,
         service_status: str = "idle",
+        stale_after_seconds: float = DEFAULT_STALE_AFTER_SECONDS,
+        record_path: Path | None = None,
+        record_append: bool = False,
     ) -> None:
         from detector import AuctionDetector
 
@@ -245,6 +356,14 @@ class ServiceRuntime:
         self._now_override: str | None = None
         self._universe = 0
         self._subscribed = 0
+        self._login_ok = False
+        self._subscribe_ok = False
+        self._last_event_ts: datetime | None = None
+        self._stale_after_seconds = stale_after_seconds
+        self._record_writer: ServiceJsonlWriter | None = None
+        self._record_path: Path | None = None
+        self._record_count = 0
+        self._record_error: BaseException | None = None
         self.shared = SharedState(
             empty_state(
                 status=service_status,
@@ -254,6 +373,8 @@ class ServiceRuntime:
                 next_window_at=None,
             )
         )
+        if record_path is not None:
+            self.start_recording(record_path, append=record_append)
 
     def reset_detector(
         self,
@@ -275,6 +396,7 @@ class ServiceRuntime:
             self._detector = detector
             self._universe = universe
             self._subscribed = subscribed
+            self._last_event_ts = None
 
     def set_context(
         self,
@@ -284,6 +406,9 @@ class ServiceRuntime:
         now_override: str | None | object = ...,
         universe: int | None = None,
         subscribed: int | None = None,
+        login_ok: bool | None = None,
+        subscribe_ok: bool | None = None,
+        last_event_ts: datetime | str | None | object = ...,
     ) -> None:
         with self._lock:
             if service_status is not None:
@@ -296,20 +421,146 @@ class ServiceRuntime:
                 self._universe = universe
             if subscribed is not None:
                 self._subscribed = subscribed
+            if login_ok is not None:
+                self._login_ok = bool(login_ok)
+            if subscribe_ok is not None:
+                self._subscribe_ok = bool(subscribe_ok)
+            if last_event_ts is not ...:
+                if isinstance(last_event_ts, datetime):
+                    parsed_last_event = last_event_ts
+                    if parsed_last_event.tzinfo is None:
+                        parsed_last_event = parsed_last_event.replace(
+                            tzinfo=TAIPEI
+                        )
+                    else:
+                        parsed_last_event = parsed_last_event.astimezone(
+                            TAIPEI
+                        )
+                    self._last_event_ts = parsed_last_event
+                else:
+                    self._last_event_ts = parse_iso(last_event_ts)
 
-    def process_event(self, event: dict[str, Any]) -> None:
+    def start_recording(
+        self,
+        path: Path,
+        *,
+        append: bool = False,
+    ) -> None:
+        resolved_path = relative_path(path)
+        writer = ServiceJsonlWriter(resolved_path, append=append)
+        writer.start()
         with self._lock:
+            if self._record_writer is not None:
+                writer.close()
+                raise RuntimeError("已有進行中的 JSONL 錄製")
+            self._record_writer = writer
+            self._record_path = resolved_path
+            self._record_count = 0
+            self._record_error = None
+
+    def finish_recording(
+        self,
+        metadata: dict[str, Any] | None = None,
+    ) -> int:
+        with self._lock:
+            writer = self._record_writer
+            self._record_writer = None
+        if writer is None:
+            return self._record_count
+        writer.close()
+        final_metadata: dict[str, Any] | None = None
+        with self._lock:
+            self._record_count = writer.count
+            self._record_error = writer.error
+            if metadata is not None:
+                final_metadata = copy.deepcopy(metadata)
+                final_metadata["generated_at"] = iso_taipei()
+                final_metadata["record_count"] = writer.count
+        if final_metadata is not None:
+            write_record_metadata(writer.path, final_metadata)
+        return writer.count
+
+    def process_event(
+        self,
+        event: dict[str, Any],
+        *,
+        market_event: bool = True,
+    ) -> None:
+        with self._lock:
+            writer = self._record_writer
+            if writer is not None:
+                try:
+                    writer.put(event)
+                except Exception as exc:
+                    self._record_error = exc
             self._detector.process_event(event)
+            if market_event:
+                self._last_event_ts = parse_iso(event.get("ts")) or taipei_now()
 
     def publish(self) -> dict[str, Any]:
         with self._lock:
             now_value = self._now_override or iso_taipei()
+            wall_now = taipei_now()
+            active_writer = self._record_writer
+            if active_writer is not None and active_writer.error is not None:
+                self._record_error = active_writer.error
+            last_event_age_sec = (
+                round(
+                    max(
+                        0.0,
+                        (wall_now - self._last_event_ts).total_seconds(),
+                    ),
+                    1,
+                )
+                if self._last_event_ts is not None
+                else None
+            )
+            service_status = self._service_status
+            if service_status in {"armed", "live"}:
+                if not self._login_ok or not self._subscribe_ok:
+                    service_status = "error"
+                elif service_status == "live" and (
+                    last_event_age_sec is None
+                    or last_event_age_sec > self._stale_after_seconds
+                ):
+                    service_status = "degraded"
+            if (
+                service_status != "replay"
+                and self._record_error is not None
+            ):
+                service_status = "error"
+            detector_status = (
+                self._service_status
+                if self._service_status
+                in {"idle", "armed", "live", "closed", "replay"}
+                else "idle"
+            )
             state = self._detector.build_state(
-                service_status=self._service_status,
+                service_status=detector_status,
                 now=now_value,
                 next_window_at=self._next_window_at,
                 universe=self._universe,
                 subscribed=self._subscribed,
+            )
+            # detector 維持既有 enum；HTTP 契約由 service 額外揭露
+            # error/degraded，不迫使判定模組認識傳輸層健康狀態。
+            state["service_status"] = service_status
+            writer = self._record_writer
+            state.update(
+                {
+                    "recording": bool(writer is not None and writer.active),
+                    "record_path": (
+                        str(self._record_path)
+                        if self._record_path is not None
+                        else None
+                    ),
+                    "record_count": (
+                        writer.count if writer is not None else self._record_count
+                    ),
+                    "last_event_age_sec": last_event_age_sec,
+                    "login_ok": self._login_ok,
+                    "subscribe_ok": self._subscribe_ok,
+                }
             )
         self.shared.replace(state)
         return state
@@ -441,31 +692,36 @@ def replay_worker(
     *,
     speed: float,
     stop_event: threading.Event,
+    record_metadata: dict[str, Any] | None = None,
 ) -> None:
     replay_started_at = rows[0][0] if rows else None
     wall_started_at = time.monotonic()
     processed = 0
-    for event_at, event in rows:
-        if stop_event.is_set():
-            return
-        if replay_started_at is not None:
-            # 以絕對 replay clock 排程，避免 Windows 對上萬個極短 wait
-            # 各自向上取整，造成 --speed 20 反而拖成數分鐘。
-            elapsed = max(
-                0.0,
-                (event_at - replay_started_at).total_seconds(),
-            )
-            target_at = wall_started_at + elapsed / speed
-            remaining = target_at - time.monotonic()
-            if remaining > 0 and stop_wait(stop_event, remaining):
+    try:
+        for event_at, event in rows:
+            if stop_event.is_set():
                 return
-        runtime.set_context(
-            service_status="replay",
-            now_override=iso_taipei(event_at),
-            next_window_at=None,
-        )
-        runtime.process_event(event)
-        processed += 1
+            if replay_started_at is not None:
+                # 以絕對 replay clock 排程，避免 Windows 對上萬個極短 wait
+                # 各自向上取整，造成 --speed 20 反而拖成數分鐘。
+                elapsed = max(
+                    0.0,
+                    (event_at - replay_started_at).total_seconds(),
+                )
+                target_at = wall_started_at + elapsed / speed
+                remaining = target_at - time.monotonic()
+                if remaining > 0 and stop_wait(stop_event, remaining):
+                    return
+            runtime.set_context(
+                service_status="replay",
+                now_override=iso_taipei(event_at),
+                next_window_at=None,
+            )
+            runtime.process_event(event)
+            processed += 1
+    finally:
+        if record_metadata is not None:
+            runtime.finish_recording(record_metadata)
 
     state = runtime.publish()
     counts = state.get("counts", {})
@@ -553,6 +809,7 @@ def live_metadata(
             "end": end_at.isoformat(timespec="seconds"),
         },
         "universe_size": len(universe),
+        "universe": [code for code, _contract in universe],
         "subscribed": len(codes),
         "channels": "bidask",
         "channels_per_stock": 1,
@@ -575,6 +832,8 @@ def run_one_live_window(
     end_at: datetime,
     universe_spec: str | None,
     stop_event: threading.Event,
+    record_enabled: bool,
+    record_out: Path | None,
 ) -> bool:
     """連線並處理單一窗口；成功完成 snapshot 回傳 True。"""
     import recorder
@@ -590,6 +849,8 @@ def run_one_live_window(
     subscription_limit = threading.Event()
     detector_ready = threading.Event()
     universe: list[tuple[str, Any]] = []
+    recording_metadata: dict[str, Any] | None = None
+    snapshot_count = 0
 
     def on_event(
         resp_code: Any,
@@ -647,6 +908,7 @@ def run_one_live_window(
                 "login OK（行情唯讀；CA=未啟用；未選帳號；未下單）",
                 flush=True,
             )
+            runtime.set_context(login_ok=True, subscribe_ok=False)
         except Exception as exc:
             raise LiveSourceError(
                 f"login FAILED（{recorder.safe_error(exc)}）"
@@ -675,6 +937,19 @@ def run_one_live_window(
             universe=universe,
             subscribed_codes=candidate_codes,
         )
+        if record_enabled:
+            output_path = record_out or (
+                BASE_DIR
+                / "data"
+                / f"auction_{start_at:%Y%m%d}.jsonl"
+            )
+            try:
+                runtime.start_recording(output_path, append=True)
+            except OSError as exc:
+                raise LiveSourceError(
+                    f"recording FAILED（{recorder.safe_error(exc)}）"
+                ) from exc
+            recording_metadata = metadata
         runtime.reset_detector(
             metadata,
             session=session,
@@ -720,6 +995,16 @@ def run_one_live_window(
             stop_event.wait(SUBSCRIBE_EVENT_GRACE_SECONDS)
 
         if not successful_codes:
+            candidate_codes.clear()
+            if recording_metadata is not None:
+                recording_metadata = live_metadata(
+                    session=session,
+                    start_at=start_at,
+                    end_at=end_at,
+                    universe=universe,
+                    subscribed_codes=[],
+                )
+            runtime.set_context(subscribed=0, subscribe_ok=False)
             raise LiveSourceError("成功訂閱檔數為 0")
         if len(successful_codes) != len(candidate_codes):
             candidate_codes.intersection_update(successful_codes)
@@ -738,7 +1023,23 @@ def run_one_live_window(
                 universe=len(universe),
                 subscribed=len(successful_codes),
             )
-        runtime.set_context(subscribed=len(successful_codes))
+        else:
+            metadata = live_metadata(
+                session=session,
+                start_at=start_at,
+                end_at=end_at,
+                universe=universe,
+                subscribed_codes=successful_codes,
+            )
+        if recording_metadata is not None:
+            recording_metadata = metadata
+        runtime.set_context(
+            subscribed=len(successful_codes),
+            subscribe_ok=(
+                len(successful_codes) == len(universe)
+                and len(universe) > 0
+            ),
+        )
         print(
             f"標的宇宙={len(universe)}；BidAsk 單通道訂閱="
             f"{len(successful_codes)} 檔",
@@ -774,7 +1075,6 @@ def run_one_live_window(
         ):
             return False
         observed_at = taipei_now().replace(tzinfo=None)
-        snapshot_count = 0
         try:
             with recorder.quiet_library_call():
                 raw_snapshots = api.snapshots(
@@ -827,6 +1127,25 @@ def run_one_live_window(
         return True
     finally:
         detector_ready.clear()
+        if recording_metadata is not None:
+            final_metadata = dict(recording_metadata)
+            final_metadata.update(
+                {
+                    "snapshot_count": snapshot_count,
+                    "snapshot_requested": len(candidate_codes),
+                    "snapshot_complete": (
+                        snapshot_count == len(candidate_codes)
+                    ),
+                }
+            )
+            try:
+                runtime.finish_recording(final_metadata)
+            except Exception as exc:
+                runtime.set_context(service_status="error")
+                print(
+                    f"record meta FAILED（{recorder.safe_error(exc)}）",
+                    flush=True,
+                )
         if api is not None:
             for contract, quote_type in reversed(active_subscriptions):
                 try:
@@ -855,6 +1174,8 @@ def live_worker(
     end_clock: datetime_time,
     universe_spec: str | None,
     stop_event: threading.Event,
+    record_enabled: bool,
+    record_out: Path | None,
 ) -> None:
     completed_a_window = False
     while not stop_event.is_set():
@@ -881,6 +1202,11 @@ def live_worker(
 
         while not stop_event.is_set():
             try:
+                runtime.set_context(
+                    login_ok=False,
+                    subscribe_ok=False,
+                    last_event_ts=None,
+                )
                 completed_a_window = run_one_live_window(
                     runtime,
                     session=session,
@@ -888,20 +1214,22 @@ def live_worker(
                     end_at=end_at,
                     universe_spec=universe_spec,
                     stop_event=stop_event,
+                    record_enabled=record_enabled,
+                    record_out=record_out,
                 )
                 break
             except LiveSourceError as exc:
                 print(str(exc), flush=True)
+                runtime.set_context(
+                    service_status="error",
+                    next_window_at=iso_taipei(start_at),
+                    now_override=None,
+                )
                 if taipei_now() >= (
                     end_at
                     + timedelta(seconds=SNAPSHOT_AFTER_END_SECONDS)
                 ):
                     break
-                runtime.set_context(
-                    service_status="idle",
-                    next_window_at=iso_taipei(start_at),
-                    now_override=None,
-                )
                 if stop_wait(stop_event, LOGIN_RETRY_SECONDS):
                     return
 
@@ -913,6 +1241,16 @@ def positive_speed(value: str) -> float:
         raise argparse.ArgumentTypeError("--speed 必須為數字") from exc
     if result <= 0:
         raise argparse.ArgumentTypeError("--speed 必須大於 0")
+    return result
+
+
+def positive_seconds(value: str) -> float:
+    try:
+        result = float(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("秒數必須為數字") from exc
+    if result <= 0:
+        raise argparse.ArgumentTypeError("秒數必須大於 0")
     return result
 
 
@@ -940,6 +1278,28 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=positive_speed,
         default=20.0,
         help="replay 加速倍率（預設 20）",
+    )
+    recording = parser.add_mutually_exclusive_group()
+    recording.add_argument(
+        "--record-out",
+        metavar="PATH",
+        help=(
+            "live 覆寫自動錄製路徑；replay 僅在明確提供此參數時錄製"
+        ),
+    )
+    recording.add_argument(
+        "--no-record",
+        action="store_true",
+        help="關閉 live 自動錄製（replay 預設即不錄製）",
+    )
+    parser.add_argument(
+        "--stale-after-sec",
+        type=positive_seconds,
+        default=DEFAULT_STALE_AFTER_SECONDS,
+        help=(
+            "live 最後事件超過幾秒即標示 degraded"
+            f"（預設 {DEFAULT_STALE_AFTER_SECONDS:g}）"
+        ),
     )
     parser.add_argument(
         "--host",
@@ -985,6 +1345,9 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     stop_event = threading.Event()
     install_stop_handlers(stop_event)
+    record_out = (
+        relative_path(args.record_out) if args.record_out else None
+    )
 
     if args.replay:
         input_path = relative_path(args.replay)
@@ -1008,6 +1371,8 @@ def main(argv: list[str] | None = None) -> int:
             window_start=window_start,
             window_end=window_end,
             service_status="replay",
+            stale_after_seconds=args.stale_after_sec,
+            record_path=record_out,
         )
         runtime.reset_detector(
             metadata,
@@ -1027,6 +1392,7 @@ def main(argv: list[str] | None = None) -> int:
             rows,
             speed=args.speed,
             stop_event=stop_event,
+            record_metadata=metadata if record_out is not None else None,
         )
         source_name = "auction-replay-source"
         mode_label = f"replay={input_path.name}；speed={args.speed:g}"
@@ -1044,6 +1410,7 @@ def main(argv: list[str] | None = None) -> int:
             window_start=start_clock.strftime("%H:%M"),
             window_end=end_clock.strftime("%H:%M"),
             service_status="idle",
+            stale_after_seconds=args.stale_after_sec,
         )
         runtime.set_context(next_window_at=iso_taipei(start_at))
         source_target = lambda: live_worker(
@@ -1053,11 +1420,18 @@ def main(argv: list[str] | None = None) -> int:
             end_clock=end_clock,
             universe_spec=args.universe,
             stop_event=stop_event,
+            record_enabled=not args.no_record,
+            record_out=record_out,
         )
         source_name = "auction-live-source"
         mode_label = (
             f"live；session={args.session}；"
-            f"window={start_clock:%H:%M}-{end_clock:%H:%M}"
+            f"window={start_clock:%H:%M}-{end_clock:%H:%M}；"
+            + (
+                "recording=off"
+                if args.no_record
+                else "recording=auto"
+            )
         )
 
     publisher = threading.Thread(
