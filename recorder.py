@@ -31,11 +31,14 @@ os.environ["LOG_SENTRY"] = ""
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
+HISTORY_DIR = DATA_DIR / "history"
 LOG_DIR = BASE_DIR / "log"
 MAX_STREAM_ATTEMPTS = 600
 PREP_SECONDS = 45
 CAPACITY_EVENT_SETTLE_SECONDS = 1.5
 SUBSCRIBE_EVENT_GRACE_SECONDS = 0.01
+SMOKE_CALLBACK_START = datetime_time(8, 30)
+SMOKE_CALLBACK_END = datetime_time(13, 35)
 SNAPSHOT_AFTER_OPEN_SECONDS = 5
 PRIORITY_CODES = (
     "2330",
@@ -62,6 +65,34 @@ REDACTIONS: list[str] = []
 PENDING_REPORT_PATH: Path | None = None
 PENDING_META_PATH: Path | None = None
 PENDING_META: dict[str, Any] | None = None
+
+
+def default_output_path(recording_at: datetime) -> Path:
+    """回傳正式錄製按交易日分區的預設 JSONL 路徑。"""
+    date_key = recording_at.strftime("%Y%m%d")
+    return HISTORY_DIR / date_key / f"auction_{date_key}.jsonl"
+
+
+def resolve_output_path(
+    args: argparse.Namespace,
+    recording_at: datetime,
+) -> Path | None:
+    """保留明確 --out；smoke 不落地；正式錄製使用日期資料夾。"""
+    if args.out:
+        return Path(args.out).expanduser().resolve()
+    if args.smoke is not None:
+        return None
+    return default_output_path(recording_at)
+
+
+def smoke_callbacks_expected(recording_at: datetime) -> bool:
+    """平日連續行情時段才把 smoke callback 視為必要條件。"""
+    return (
+        recording_at.weekday() < 5
+        and SMOKE_CALLBACK_START
+        <= recording_at.time()
+        <= SMOKE_CALLBACK_END
+    )
 
 
 def configure_output() -> None:
@@ -628,12 +659,7 @@ def run_recorder(args: argparse.Namespace) -> int:
         )
         wait_until(start_at - timedelta(seconds=PREP_SECONDS), "等待訂閱準備時點")
 
-    if args.out:
-        out_path = Path(args.out).expanduser().resolve()
-    elif args.smoke is None:
-        out_path = DATA_DIR / f"auction_{start_at:%Y%m%d}.jsonl"
-    else:
-        out_path = None
+    out_path = resolve_output_path(args, start_at)
     if out_path is not None:
         PENDING_META_PATH = out_path.with_suffix(".meta.json")
 
@@ -1037,9 +1063,15 @@ def run_recorder(args: argparse.Namespace) -> int:
             )
             and not frozen_errors
         )
+        callback_skipped = (
+            args.smoke is not None
+            and not smoke_callbacks_expected(start_at)
+            and not callback_ok
+            and not frozen_errors
+        )
         print(
             "callback OK="
-            + ("Y" if callback_ok else "N")
+            + ("Y" if callback_ok else "SKIP" if callback_skipped else "N")
             + f"（Tick={frozen_counts['tick']}、"
             f"BidAsk={frozen_counts['bidask']}）"
         )
@@ -1055,6 +1087,11 @@ def run_recorder(args: argparse.Namespace) -> int:
         )
         if args.smoke is not None and frozen_simtrade["true"] == 0:
             print("此刻 simtrade 全為 False：非試撮時段 smoke 屬正常")
+        if callback_skipped:
+            print(
+                "callback 驗收略過：目前不在平日 08:30–13:35 "
+                "連續行情可觀測時段"
+            )
         if frozen_errors:
             print("callback/寫檔錯誤=" + ",".join(frozen_errors))
         if out_path is not None and writer is not None:
@@ -1092,11 +1129,21 @@ def run_recorder(args: argparse.Namespace) -> int:
         }
 
         snapshot_ok = snapshot_count == snapshot_requested
-        acceptance = callback_ok and subscribed_count > 0 and snapshot_ok
+        callback_requirement_ok = callback_ok or callback_skipped
+        acceptance = (
+            callback_requirement_ok
+            and subscribed_count > 0
+            and snapshot_ok
+        )
+        acceptance_callback_label = (
+            "模式所需 callback 正常"
+            if callback_ok
+            else "非行情時段 callback 略過"
+        )
         print(
             "管線驗收="
             + ("PASS" if acceptance else "FAIL")
-            + "（成功訂閱>0、模式所需 callback 正常、snapshot 完整）"
+            + f"（成功訂閱>0、{acceptance_callback_label}、snapshot 完整）"
         )
         if args.smoke is not None:
             print("是否遇 0xC0000142=N（本次程序正常啟動）")
@@ -1160,7 +1207,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--out",
-        help="raw JSONL 路徑；正式錄製預設 data/auction_YYYYMMDD.jsonl",
+        help=(
+            "raw JSONL 路徑；正式錄製預設 "
+            "data/history/YYYYMMDD/auction_YYYYMMDD.jsonl"
+        ),
     )
     parser.add_argument(
         "--universe",

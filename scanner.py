@@ -21,6 +21,7 @@ from zoneinfo import ZoneInfo
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
+HISTORY_DIR = DATA_DIR / "history"
 TAIPEI = ZoneInfo("Asia/Taipei")
 DEFAULT_BID0_REMAIN_RATIO = 0.30
 DEFAULT_DROP_LOOKBACK_SECONDS = 30 * 60
@@ -172,6 +173,22 @@ def normalize_date(value: Any, fallback: datetime | None = None) -> str:
     if re.fullmatch(r"\d{4}-\d{2}-\d{2}", text):
         return text
     return (fallback or datetime.now()).strftime("%Y-%m-%d")
+
+
+def history_directory(date_value: Any = None) -> Path:
+    normalized = normalize_date(date_value, datetime.now(TAIPEI))
+    return HISTORY_DIR / normalized.replace("-", "")
+
+
+def default_input_path(date_value: Any = None) -> Path:
+    directory = history_directory(date_value)
+    date_key = directory.name
+    return directory / f"auction_{date_key}.jsonl"
+
+
+def default_output_path(date_value: Any = None) -> Path:
+    directory = history_directory(date_value)
+    return directory / f"result_{directory.name}.json"
 
 
 def infer_date_from_filename(path: Path) -> str | None:
@@ -1017,8 +1034,24 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="掃描試撮鎖漲停與開盤撤單，輸出 dashboard result JSON"
     )
-    parser.add_argument("--in", dest="input_path", type=Path, help="auction JSONL")
-    parser.add_argument("--out", dest="output_path", type=Path, help="result JSON")
+    parser.add_argument(
+        "--in",
+        dest="input_path",
+        type=Path,
+        help=(
+            "auction JSONL；預設 "
+            "data/history/今日日期/auction_今日日期.jsonl"
+        ),
+    )
+    parser.add_argument(
+        "--out",
+        dest="output_path",
+        type=Path,
+        help=(
+            "result JSON；預設依輸入資料日期寫入 "
+            "data/history/YYYYMMDD/result_YYYYMMDD.json"
+        ),
+    )
     parser.add_argument(
         "--open-source",
         choices=("auto", "tick", "snapshot", "none"),
@@ -1067,8 +1100,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def validate_args(args: argparse.Namespace) -> None:
-    if not args.sample and args.input_path is None:
-        raise ValueError("一般掃描必須提供 --in")
     if args.sample and args.input_path is not None:
         raise ValueError("--sample 不需且不可搭配 --in")
     if args.open_grace_sec < 0:
@@ -1095,7 +1126,7 @@ def main(argv: list[str] | None = None) -> int:
             )
             output_path = args.output_path or DATA_DIR / "result_sample.json"
         else:
-            input_path = args.input_path.resolve()
+            input_path = (args.input_path or default_input_path()).resolve()
             if not input_path.is_file():
                 raise FileNotFoundError(input_path)
             events = read_jsonl(input_path)
@@ -1105,9 +1136,7 @@ def main(argv: list[str] | None = None) -> int:
                 or infer_date_from_filename(input_path)
                 or datetime.now(TAIPEI).strftime("%Y-%m-%d")
             )
-            output_path = args.output_path or DATA_DIR / (
-                f"result_{normalize_date(inferred_date).replace('-', '')}.json"
-            )
+            output_path = args.output_path or default_output_path(inferred_date)
 
         result = build_result(
             events,

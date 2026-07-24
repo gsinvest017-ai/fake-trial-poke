@@ -18,6 +18,7 @@ sys.path.insert(
 )
 
 import scanner
+import recorder
 import service
 import webserver
 
@@ -110,6 +111,60 @@ def synthetic_events(now: object) -> list[dict[str, object]]:
 
 
 class ServiceRecordTests(unittest.TestCase):
+    def test_default_storage_paths_are_partitioned_by_date(self) -> None:
+        recording_at = service.taipei_now().replace(
+            year=2026,
+            month=7,
+            day=24,
+            hour=8,
+            minute=30,
+            second=0,
+            microsecond=0,
+        )
+        expected_dir = (
+            pathlib.Path(__file__).resolve().parent.parent
+            / "data"
+            / "history"
+            / "20260724"
+        )
+        expected_auction = expected_dir / "auction_20260724.jsonl"
+
+        self.assertEqual(recorder.default_output_path(recording_at), expected_auction)
+        self.assertEqual(
+            service.default_live_record_path(recording_at),
+            expected_auction,
+        )
+        self.assertEqual(
+            scanner.default_input_path("2026-07-24"),
+            expected_auction,
+        )
+        self.assertEqual(
+            scanner.default_output_path("2026-07-24"),
+            expected_dir / "result_20260724.json",
+        )
+
+        smoke_args = recorder.parse_args(["--smoke", "15"])
+        self.assertIsNone(
+            recorder.resolve_output_path(smoke_args, recording_at)
+        )
+
+    def test_smoke_callback_requirement_tracks_market_hours(self) -> None:
+        market_open = service.taipei_now().replace(
+            year=2026,
+            month=7,
+            day=24,
+            hour=9,
+            minute=0,
+            second=0,
+            microsecond=0,
+        )
+        after_hours = market_open.replace(hour=17)
+        weekend = market_open.replace(day=25)
+
+        self.assertTrue(recorder.smoke_callbacks_expected(market_open))
+        self.assertFalse(recorder.smoke_callbacks_expected(after_hours))
+        self.assertFalse(recorder.smoke_callbacks_expected(weekend))
+
     def make_runtime(
         self,
         *,

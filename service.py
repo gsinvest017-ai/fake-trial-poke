@@ -34,6 +34,8 @@ os.environ.setdefault("LOGURU_LEVEL", "ERROR")
 os.environ["LOG_SENTRY"] = ""
 
 BASE_DIR = Path(__file__).resolve().parent
+DATA_DIR = BASE_DIR / "data"
+HISTORY_DIR = DATA_DIR / "history"
 TAIPEI = ZoneInfo("Asia/Taipei")
 DEFAULT_HOST = "127.0.0.1"
 MAX_SUBSCRIBED_STOCKS = 254
@@ -104,6 +106,12 @@ def relative_path(value: str | Path) -> Path:
     if not path.is_absolute():
         path = BASE_DIR / path
     return path.resolve()
+
+
+def default_live_record_path(recording_at: datetime) -> Path:
+    """回傳 live 正式錄製按交易日分區的預設 JSONL 路徑。"""
+    date_key = recording_at.strftime("%Y%m%d")
+    return HISTORY_DIR / date_key / f"auction_{date_key}.jsonl"
 
 
 def safe_int(value: Any, default: int = 0) -> int:
@@ -966,11 +974,7 @@ def run_one_live_window(
             subscribed_codes=candidate_codes,
         )
         if record_enabled:
-            output_path = record_out or (
-                BASE_DIR
-                / "data"
-                / f"auction_{start_at:%Y%m%d}.jsonl"
-            )
+            output_path = record_out or default_live_record_path(start_at)
             try:
                 runtime.start_recording(output_path, append=True)
             except OSError as exc:

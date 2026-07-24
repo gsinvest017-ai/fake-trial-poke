@@ -51,7 +51,9 @@ SHIOAJI_SECRET_KEY=接手人自己的_secret_key
 
 ### Live 自動錄製與誠實狀態
 
-Live 模式預設會將送進偵測器的每一筆 `bidask`、`tick`、`snapshot` 原始事件，同步寫入相對於 `service.py` 的 `data\auction_YYYYMMDD.jsonl`。窗口結束後另寫同名的 `.meta.json`，保存 session、window、universe、實際訂閱數，以及每檔股票的 `limit_up`。這些檔案可供後續 replay、`scanner.py` 掃描與分析，不會因即時窗口結束而遺失。
+Live 模式預設會將送進偵測器的每一筆 `bidask`、`tick`、`snapshot` 原始事件，同步寫入相對於 `service.py` 的 `data\history\YYYYMMDD\auction_YYYYMMDD.jsonl`；日期資料夾不存在時會自動建立。窗口結束後另寫同資料夾、同名的 `.meta.json`，保存 session、window、universe、實際訂閱數，以及每檔股票的 `limit_up`。這些檔案可供後續 replay、`scanner.py` 掃描與分析，不會因即時窗口結束而遺失。
+
+`recorder.py` 的正式錄製也使用相同的日期資料夾慣例；`--smoke` 僅驗證即時管線，不會把測試資料寫進 `history`。平日 08:30–13:35 會嚴格要求收到 callback；其餘時段無連續行情可觀測時，callback 會標示 `SKIP`，但登入、訂閱、snapshot 與清理仍須全部正常。
 
 如明確不需要落地，可用 `--no-record` 關閉：
 
@@ -62,8 +64,14 @@ python service.py --no-record
 Replay 模式預設只讀取既有檔案，不會再次寫入或覆蓋錄製檔。只有明確提供 `--record-out` 才會把 replay 事件另存到指定路徑；例如可寫入系統暫存目錄，再交給 scanner 驗證：
 
 ```powershell
-python service.py --replay data\auction_YYYYMMDD.jsonl --speed 50 --record-out "$env:TEMP\live_rec.jsonl"
+python service.py --replay data\history\YYYYMMDD\auction_YYYYMMDD.jsonl --speed 50 --record-out "$env:TEMP\live_rec.jsonl"
 python scanner.py --in "$env:TEMP\live_rec.jsonl" --out "$env:TEMP\live_rec_result.json"
+```
+
+`scanner.py` 未提供 `--in` 時，預設讀取今日的 `data\history\YYYYMMDD\auction_YYYYMMDD.jsonl`；未提供 `--out` 時，會依輸入資料的日期將結果寫成 `data\history\YYYYMMDD\result_YYYYMMDD.json`。因此掃描指定歷史檔時可只寫：
+
+```powershell
+python scanner.py --in data\history\20260724\auction_20260724.jsonl
 ```
 
 完成 replay 後可按 `Ctrl+C` 停止服務。要在不登入 Shioaji、也不碰 `data\` 的情況下自動驗證錄製 schema、scanner/replay 相容性與狀態契約，也可直接執行：
@@ -85,7 +93,7 @@ python tests\test_service_record.py
 Replay 模式會讀取既有的試撮 JSONL，不登入 Shioaji。請在專案資料夾開啟 PowerShell，執行：
 
 ```powershell
-.\.venv\Scripts\python.exe service.py --replay data\auction_YYYYMMDD.jsonl --speed 20
+.\.venv\Scripts\python.exe service.py --replay data\history\YYYYMMDD\auction_YYYYMMDD.jsonl --speed 20
 ```
 
 將 `YYYYMMDD` 換成實際檔案日期，`--speed` 是重播加速倍率。Replay 啟動後同樣用瀏覽器開啟：
@@ -97,7 +105,7 @@ http://127.0.0.1:8900/
 若不使用專案虛擬環境，也可改用：
 
 ```powershell
-python service.py --replay data\auction_YYYYMMDD.jsonl --speed 20
+python service.py --replay data\history\YYYYMMDD\auction_YYYYMMDD.jsonl --speed 20
 ```
 
 ## 5. 開機登入後自動啟動（選用）

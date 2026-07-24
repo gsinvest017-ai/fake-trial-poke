@@ -685,7 +685,7 @@ def main() -> int:
     api: sj.Shioaji | None = None
     active_subscriptions: list[Any] = []
 
-    env_path = Path(__file__).resolve().with_name(".env")
+    env_path = Path(__file__).resolve().parent.parent / ".env"
     try:
         env_values = load_dotenv_manually(env_path)
         api_key = env_values.get("SHIOAJI_API_KEY", "").strip()

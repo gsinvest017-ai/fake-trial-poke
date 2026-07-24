@@ -109,7 +109,7 @@ def print_object(code: str, label: str, obj: Any | None, cls: type[Any]) -> None
 
 
 def main() -> int:
-    env = load_env(Path(__file__).with_name(".env"))
+    env = load_env(Path(__file__).resolve().parent.parent / ".env")
     api_key = env.get("SHIOAJI_API_KEY", "").strip()
     secret_key = env.get("SHIOAJI_SECRET_KEY", "").strip()
     if not api_key or not secret_key:

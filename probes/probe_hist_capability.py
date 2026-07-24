@@ -30,7 +30,8 @@ import shioaji as sj
 
 TAIPEI_TZ = timezone(timedelta(hours=8))
 TARGET_CODE = "2330"
-OUT_PATH = Path(__file__).resolve().parent / "log" / "hist-capability-out.txt"
+PROJECT_DIR = Path(__file__).resolve().parent.parent
+OUT_PATH = PROJECT_DIR / "log" / "hist-capability-out.txt"
 REDACTIONS: list[str] = []
 
 HISTORY_CANDIDATE_NAMES = (
@@ -482,7 +483,7 @@ def main() -> int:
     exit_code = 1
 
     try:
-        env_path = Path(__file__).resolve().with_name(".env")
+        env_path = PROJECT_DIR / ".env"
         env_values = load_dotenv_manually(env_path)
         api_key = env_values.get("SHIOAJI_API_KEY", "").strip()
         secret_key = env_values.get("SHIOAJI_SECRET_KEY", "").strip()

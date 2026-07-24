@@ -22,7 +22,7 @@ from typing import Any, Iterable
 os.environ.setdefault("LOGURU_LEVEL", "ERROR")
 os.environ["LOG_SENTRY"] = ""
 
-BASE_DIR = Path(__file__).resolve().parent
+BASE_DIR = Path(__file__).resolve().parent.parent
 LOG_DIR = BASE_DIR / "log"
 DATA_DIR = BASE_DIR / "data"
 

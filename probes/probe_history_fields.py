@@ -99,7 +99,7 @@ def related(obj: Any) -> list[str]:
 
 
 def main() -> int:
-    env = load_env(Path(__file__).with_name(".env"))
+    env = load_env(Path(__file__).resolve().parent.parent / ".env")
     key = env.get("SHIOAJI_API_KEY", "").strip()
     secret = env.get("SHIOAJI_SECRET_KEY", "").strip()
     if not key or not secret:
