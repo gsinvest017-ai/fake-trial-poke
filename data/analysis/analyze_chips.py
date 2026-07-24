@@ -29,10 +29,16 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 CACHE_DIR = SCRIPT_DIR / "cache"
 OUTPUT_PATH = SCRIPT_DIR / "chips.json"
 
+PROJECT_DIR = SCRIPT_DIR.parent.parent
+ENV_PATH = PROJECT_DIR / ".env"
+
 STOCKS = {
     "8039": "台虹",
     "2392": "正崴",
     "2201": "裕隆",
+    "6488": "環球晶",
+    "2481": "強茂",
+    "6147": "頎邦",
 }
 
 # FinMind / TWSE 官方口徑：
@@ -106,12 +112,34 @@ def cache_filename(dataset: str, tag: str) -> Path:
     return CACHE_DIR / f"chips_finmind_{dataset}_{safe_tag}.json"
 
 
+def dotenv_token() -> str:
+    if not ENV_PATH.exists():
+        return ""
+    for raw_line in ENV_PATH.read_text(encoding="utf-8-sig").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        if key.strip() not in {"FINMIND_API_TOKEN", "FINMIND_TOKEN"}:
+            continue
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+            value = value[1:-1]
+        if value:
+            return value
+    return ""
+
+
 def request_headers() -> dict[str, str]:
     headers = {
         "Accept": "application/json",
         "User-Agent": "fake-auction-stock-analysis/1.0",
     }
-    token = os.environ.get("FINMIND_API_TOKEN") or os.environ.get("FINMIND_TOKEN")
+    token = (
+        os.environ.get("FINMIND_API_TOKEN")
+        or os.environ.get("FINMIND_TOKEN")
+        or dotenv_token()
+    )
     if token:
         headers["Authorization"] = f"Bearer {token}"
     return headers
@@ -147,7 +175,7 @@ def fetch_finmind(
     refresh: bool,
     max_attempts: int = 5,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    """取得一個 FinMind response，遇 HTTP/API 402 時做指數退避。"""
+    """取得一個 FinMind response，遇認證、限流或暫時錯誤時指數退避。"""
     dataset = params["dataset"]
     cache_path = cache_filename(dataset, cache_tag)
     if not refresh and cache_path.exists():
@@ -201,7 +229,10 @@ def fetch_finmind(
             last_http_status = None
 
         api_status = last_payload.get("status")
-        is_rate_limited = last_http_status == 402 or api_status == 402
+        is_rate_limited = (
+            last_http_status in {401, 402, 429}
+            or api_status in {401, 402, 429}
+        )
         is_transient_failure = (
             is_rate_limited
             or api_status == 0
@@ -212,7 +243,7 @@ def fetch_finmind(
             if attempt < max_attempts:
                 time.sleep(2 ** (attempt - 1))
                 continue
-            # 不把 402／網路／伺服器暫時錯誤寫成 canonical cache，讓下次重跑能重試。
+            # 不把認證／限流／網路／伺服器暫時錯誤寫成 canonical cache，讓下次重跑能重試。
             return last_payload, {
                 "transport": "network",
                 "cache_file": None,
@@ -687,7 +718,8 @@ def main() -> int:
             "disposition_dataset": "TaiwanStockDispositionSecuritiesPeriod",
             "cache_policy": (
                 "每個 API query 的 JSON response 均快取；預設重跑優先讀 cache。"
-                "HTTP/API 402 使用 1/2/4/8 秒指數退避，共最多 5 次。"
+                "HTTP/API 401/402/429 與伺服器暫時錯誤使用 1/2/4/8 秒"
+                "指數退避，共最多 5 次。"
             ),
         },
         "source_status": {
@@ -712,7 +744,7 @@ def main() -> int:
             "unit": "shares；另提供除以 1,000 的 lots",
         },
         "quality_notes": [
-            "只分析 8039、2392、2201，法人序列各保留最近 60 個可得交易日。",
+            "分析 8039、2392、2201、6488、2481、6147，法人序列各保留最近 60 個可得交易日。",
             "未把 2026-07-24 盤中或盤前資訊混入法人買賣超；最新完整法人資料為實際 API 回傳末日。",
             "FinMind 法人日資料可能在盤後因鉅額／定價交易補登；本檔保存的是產生時 API 最新版本。",
             "處置資料為 FinMind 會員限制資料；若權限不足會明確標 unavailable，不以空資料代表未處置。",

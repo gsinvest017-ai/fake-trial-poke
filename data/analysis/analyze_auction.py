@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Extract auditable pre-open auction details for the three focus stocks.
+"""Extract auditable pre-open auction details for focus and anomaly stocks.
 
 Inputs are the detector summary and the raw JSONL recorder output.  No network
 access is required.  The raw bid-one series is retained for the offline replay
@@ -17,7 +17,13 @@ from pathlib import Path
 from typing import Any
 
 
-STOCKS = {"8039": "台虹", "2392": "正崴", "2201": "裕隆"}
+FOCUS_STOCKS = {"8039": "台虹", "2392": "正崴", "2201": "裕隆"}
+ANOMALY_STOCKS = {"6488": "環球晶", "2481": "強茂", "6147": "頎邦"}
+STOCKS = {**FOCUS_STOCKS, **ANOMALY_STOCKS}
+ANOM_BID_PEAK_LOTS = 300
+ANOM_BID_REMAIN_RATIO = 0.30
+ANOM_SWING_PCT = 5.0
+ANOM_GAP_PCT = 4.0
 POSTOPEN_START = "09:03:00"
 POSTOPEN_END_EXCLUSIVE = "09:06:00"
 POSTOPEN_LABEL = "09:03–09:05"
@@ -348,6 +354,99 @@ def build_stock_detail(
     }
 
 
+def build_anomaly_detail(
+    code: str,
+    summary: dict[str, Any],
+    raw_series: list[dict[str, Any]],
+    raw_count: int,
+) -> dict[str, Any]:
+    if not raw_series:
+        raise ValueError(f"{code}: no usable raw pre-open bid-one series")
+    reference = float(summary["reference"])
+    open_price_value = number_at(summary.get("open_price"))
+    open_price = float(open_price_value) if open_price_value is not None else None
+    volumes = [int(item["bid_volume_lots"]) for item in raw_series]
+    prices = [float(item["bid_price"]) for item in raw_series if float(item["bid_price"]) > 0]
+    if not prices:
+        raise ValueError(f"{code}: no positive simulated bid-one prices")
+
+    peak_volume = max(volumes)
+    final_volume = volumes[-1]
+    remain_ratio = final_volume / peak_volume if peak_volume > 0 else None
+    withdraw_pct = (
+        (1.0 - remain_ratio) * 100.0 if remain_ratio is not None else None
+    )
+    min_price = min(prices)
+    max_price = max(prices)
+    swing_pct = (max_price - min_price) / reference * 100.0
+    reference_open_gap_pct = (
+        (open_price / reference - 1.0) * 100.0
+        if open_price is not None and reference > 0
+        else None
+    )
+
+    anomalies: list[str] = []
+    if (
+        peak_volume >= ANOM_BID_PEAK_LOTS
+        and remain_ratio is not None
+        and remain_ratio < ANOM_BID_REMAIN_RATIO
+    ):
+        anomalies.append("ANOM_BIG_BID_WITHDRAW")
+    if swing_pct >= ANOM_SWING_PCT:
+        anomalies.append("ANOM_BID0_SWING")
+    if reference_open_gap_pct is not None and abs(reference_open_gap_pct) >= ANOM_GAP_PCT:
+        anomalies.append("ANOM_OPEN_GAP")
+
+    return {
+        "code": code,
+        "name": summary.get("name") or STOCKS[code],
+        "availability": "available",
+        "signal_type": "other_anomaly",
+        "signal_distinction": (
+            "此為其他異常＝大單驟撤/試撮劇震/開盤跳空，非試撮鎖漲停，訊號性質不同"
+        ),
+        "reference_price": reference,
+        "open_price": open_price,
+        "bid0_peak_volume": peak_volume,
+        "final_window_bid0_volume": final_volume,
+        "bid0_withdraw_pct": round(withdraw_pct, 4) if withdraw_pct is not None else None,
+        "bid0_min_price": min_price,
+        "bid0_max_price": max_price,
+        "bid0_swing_pct": round(swing_pct, 4),
+        "reference_open_gap_pct": (
+            round(reference_open_gap_pct, 4)
+            if reference_open_gap_pct is not None
+            else None
+        ),
+        "open_gap_direction": (
+            "up"
+            if reference_open_gap_pct is not None and reference_open_gap_pct > 0
+            else "down"
+            if reference_open_gap_pct is not None and reference_open_gap_pct < 0
+            else "flat"
+            if reference_open_gap_pct == 0
+            else None
+        ),
+        "anomalies": anomalies,
+        "anomaly_score": len(anomalies),
+        "raw_target_rows": raw_count,
+        "replay_points": len(raw_series),
+        "bid_one_series": raw_series,
+        "thresholds": {
+            "bid_peak_lots": ANOM_BID_PEAK_LOTS,
+            "bid_remain_ratio": ANOM_BID_REMAIN_RATIO,
+            "bid_withdraw_pct": (1.0 - ANOM_BID_REMAIN_RATIO) * 100.0,
+            "swing_pct": ANOM_SWING_PCT,
+            "gap_pct": ANOM_GAP_PCT,
+        },
+        "quality_notes": [
+            "買一序列直接取自 auction_20260724.jsonl 之 simtrade=true bidask 事件。",
+            "撤單比例與試撮振幅依 detector.py 同口徑重算；開盤跳空使用 result_20260724.json 的實際開盤價相對前收重算。",
+            "異常分數是命中維度數；門檻尚未校準、可調，不等同違規認定或單獨交易訊號。",
+        ],
+    }
+
+
 def main() -> None:
     args = parse_args()
     detector, summaries = read_detector_summary(args.result)
@@ -356,7 +455,7 @@ def main() -> None:
         args.postopen
     )
     stocks = {}
-    for code in STOCKS:
+    for code in FOCUS_STOCKS:
         if not raw_series.get(code):
             raise ValueError(f"{code}: no usable raw pre-open bid-one series")
         stocks[code] = build_stock_detail(
@@ -368,6 +467,10 @@ def main() -> None:
             postopen_series.get(code, []),
             postopen_counts.get(code, 0),
             postopen_invalid_counts.get(code, 0),
+        )
+    for code in ANOMALY_STOCKS:
+        stocks[code] = build_anomaly_detail(
+            code, summaries[code], raw_series.get(code, []), raw_counts.get(code, 0)
         )
 
     payload = {
@@ -395,6 +498,14 @@ def main() -> None:
     )
     print(f"wrote {args.output} ({args.output.stat().st_size:,} bytes)")
     for code, detail in stocks.items():
+        if detail.get("signal_type") == "other_anomaly":
+            print(
+                f"{code} {detail['name']}: anomaly_score={detail['anomaly_score']}, "
+                f"withdraw={detail['bid0_withdraw_pct']:.2f}%, "
+                f"swing={detail['bid0_swing_pct']:.2f}%, "
+                f"open_gap={detail['reference_open_gap_pct']:.2f}%"
+            )
+            continue
         print(
             f"{code} {detail['name']}: {detail['limit_up_price']} -> "
             f"{detail['open_price']} ({detail['auction_to_open_gap_pct']:.2f}%), "

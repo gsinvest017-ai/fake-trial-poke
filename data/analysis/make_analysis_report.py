@@ -14,6 +14,7 @@ from typing import Any, Iterable
 
 
 ORDER = ("8039", "2392", "2201")
+ANOMALY_ORDER = ("6488", "2481", "6147")
 MARGIN_ORDER = ("8039", "2392", "2201", "6488", "2481", "6147")
 NAMES = {
     "8039": "台虹",
@@ -29,6 +30,11 @@ MA_COLORS = {
     "ma60": "#7c3aed",
     "ma120": "#0891b2",
     "ma240": "#475569",
+}
+ANOMALY_LABELS = {
+    "ANOM_BIG_BID_WITHDRAW": "大單驟撤",
+    "ANOM_BID0_SWING": "試撮劇震",
+    "ANOM_OPEN_GAP": "開盤跳空",
 }
 
 
@@ -236,9 +242,13 @@ def auction_svg(stock: dict[str, Any]) -> str:
     valid_prices = [value for value in prices if value is not None and value > 0]
     if not valid_prices:
         return placeholder_svg("試撮買一價量回放", "買一價格皆無效")
+    signal_type = stock.get("signal_type")
     limit_up = finite(stock.get("limit_up_price"))
+    reference = finite(stock.get("reference_price"))
     open_price = finite(stock.get("open_price"))
-    domain = valid_prices + [v for v in (limit_up, open_price) if v is not None]
+    domain = valid_prices + [
+        v for v in (limit_up, reference, open_price) if v is not None
+    ]
     low, high = min(domain), max(domain)
     padding = max((high - low) * 0.08, high * 0.01)
     low, high = low - padding, high + padding
@@ -251,7 +261,11 @@ def auction_svg(stock: dict[str, Any]) -> str:
     parts = [
         '<svg class="chart" viewBox="0 0 960 420" role="img" aria-label="試撮買一價量回放">',
         '<rect width="960" height="420" fill="#ffffff"/>',
-        '<text x="66" y="20" class="svg-title">試撮期買一價／量回放</text>',
+        (
+            '<text x="66" y="20" class="svg-title">其他異常：試撮期買一價／量回放</text>'
+            if signal_type == "other_anomaly"
+            else '<text x="66" y="20" class="svg-title">試撮期買一價／量回放</text>'
+        ),
     ]
     for level in range(4):
         y = price_y + price_h * level / 3
@@ -275,6 +289,7 @@ def auction_svg(stock: dict[str, Any]) -> str:
     )
     for value, color, label in (
         (limit_up, "#dc2626", "試撮漲停"),
+        (reference, "#64748b", "前收"),
         (open_price, "#1d4ed8", "實際開盤"),
     ):
         if value is None:
@@ -704,7 +719,7 @@ def auditable_market_label(market: dict[str, Any]) -> str:
 
 def kbar_quality_note(kbar: dict[str, Any]) -> str:
     quality = kbar.get("data_quality", {})
-    factor = quality.get("adjustment_factor_details", {})
+    factor = quality.get("adjustment_factor_details") or {}
     parts = [
         f"有效 {fmt_num(quality.get('row_count'), 0)} 筆",
         f"期間 {quality.get('first_date', '未取得')} 至 {quality.get('last_date', '未取得')}",
@@ -720,6 +735,12 @@ def kbar_quality_note(kbar: dict[str, Any]) -> str:
     placeholders = quality.get("dropped_zero_ohlcv_placeholder_dates", [])
     if placeholders:
         parts.append("排除全零 OHLCV 占位列 " + "、".join(str(value) for value in placeholders))
+    volume_crosscheck = factor.get("latest_volume_crosscheck", {})
+    if volume_crosscheck:
+        parts.append(
+            f"{volume_crosscheck.get('date')} 成交量與 Yahoo 差 "
+            f"{signed(volume_crosscheck.get('difference_pct'), 2, '%')}"
+        )
     return "；".join(parts) + "。"
 
 
@@ -905,6 +926,330 @@ def metric(label: str, value: str, note: str = "") -> str:
         f'<div class="metric-note">{esc(note)}</div>'
         "</div>"
     )
+
+
+def anomaly_label_text(auction: dict[str, Any]) -> str:
+    dimensions = auction.get("anomalies", [])
+    if not isinstance(dimensions, list):
+        return "未取得"
+    labels = [ANOMALY_LABELS.get(str(item), str(item)) for item in dimensions]
+    return "／".join(labels) if labels else "未命中"
+
+
+def anomaly_evidence_and_verdict(
+    code: str,
+    auction: dict[str, Any],
+    kbar: dict[str, Any],
+    margin_maint: dict[str, Any],
+    chips: dict[str, Any],
+    market: dict[str, Any],
+    liquidity: dict[str, Any],
+) -> dict[str, Any]:
+    ksum = kbar.get("summary", {})
+    moving = ksum.get("moving_averages", {})
+    margin_current = margin_maint.get("current", {})
+    margin_trend = margin_maint.get("trend_20d", {})
+    chips_available = chips.get("availability") == "available"
+    chips_total = chips.get("summary", {}).get("total", {})
+    chips_reason = chips.get("reason") or "未取得"
+    open_price = finite(auction.get("open_price"))
+    close = finite(ksum.get("latest_adjusted_close"))
+    labels = anomaly_label_text(auction)
+    exact_distinction = (
+        "此為其他異常＝大單驟撤/試撮劇震/開盤跳空，"
+        "非試撮鎖漲停，訊號性質不同"
+    )
+    evidence = [
+        exact_distinction + "。",
+        (
+            f"買一量高峰 {fmt_num(auction.get('bid0_peak_volume'), 0)} 張，"
+            f"窗口末筆 {fmt_num(auction.get('final_window_bid0_volume'), 0)} 張，"
+            f"撤單 {fmt_num(auction.get('bid0_withdraw_pct'), 2)}%；"
+            f"試撮買一 {fmt_price(auction.get('bid0_min_price'))}–"
+            f"{fmt_price(auction.get('bid0_max_price'))} 元，"
+            f"振幅 {fmt_num(auction.get('bid0_swing_pct'), 2)}%。"
+        ),
+        (
+            f"實際開盤 {fmt_price(open_price)} 元，相對前收 {fmt_price(close)} 元"
+            f"跳空 {signed(auction.get('reference_open_gap_pct'), 2, '%')}；"
+            f"三維命中為 {labels}，異常分數 "
+            f"{fmt_num(auction.get('anomaly_score'), 0)}。"
+        ),
+        (
+            f"7/23 日 K 為「{ksum.get('trend', '未取得')}」；"
+            f"5 日／20 日報酬 {signed(ksum.get('returns', {}).get('5d_pct'), 2, '%')}／"
+            f"{signed(ksum.get('returns', {}).get('20d_pct'), 2, '%')}，"
+            f"收盤相對 MA20 {signed(moving.get('ma20', {}).get('close_minus_ma_pct'), 2, '%')}。"
+        ),
+        (
+            f"7/23 成交量 {fmt_num(ksum.get('latest_volume_lots'), 1)} 張，"
+            f"為 20 日均量 {fmt_num(ksum.get('volume_ratio_vs_20d'), 3)} 倍；"
+            f"估算 20 日日均成交值 {fmt_num(liquidity.get('avg_turnover_m_twd'), 1)} 百萬元。"
+        ),
+        (
+            f"融資維持率 {fmt_num(margin_current.get('maintenance_rate_pct'), 2)}%，"
+            f"屬「{margin_current.get('risk_level', '未取得')}」；近 20 日"
+            f"{margin_trend.get('direction', '未取得')} "
+            f"{signed(margin_trend.get('change_pct_points'), 2, ' 個百分點')}。"
+        ),
+        (
+            f"三大法人 5 日／20 日合計 "
+            f"{signed(chips_total.get('last_5d', {}).get('net_lots'), 1)}／"
+            f"{signed(chips_total.get('last_20d', {}).get('net_lots'), 1)} 張。"
+            if chips_available
+            else f"三大法人資料未取得：{chips_reason}；不以缺值推論買賣方向。"
+        ),
+        (
+            f"大盤為「{auditable_market_label(market)}」，TAIEX 20 日報酬 "
+            f"{signed(market.get('summary', {}).get('returns', {}).get('20d_pct'), 2, '%')}。"
+        ),
+    ]
+
+    if code == "6488":
+        title = "短線轉弱但長均仍多：三維異常全中，開低與劇震提高事件風險"
+        tone = "warning"
+        conclusion = (
+            f"{exact_distinction}。開盤相對前收下跳空，且 5 日報酬明顯為負，"
+            "開盤與前收均低於 MA5／MA20，說明短線壓力不是只有試撮噪音；"
+            "但股價仍高於 MA60／MA120／MA240，20 日報酬仍為正，不能直接外推為中長期反轉。"
+            f"融資維持率 {fmt_num(margin_current.get('maintenance_rate_pct'), 1)}% 尚在正常帶，"
+            "只是近 20 日緩衝快速收斂；法人缺值使籌碼確認不足。"
+        )
+        action = (
+            "不把異常分數當作放空或抄底訊號。短線至少等價格重新站回 MA5／MA20、"
+            "開低缺口出現實際成交承接後再評估；若續跌且融資維持率逼近 150%，"
+            "槓桿壓力會比試撮本身更重要。"
+        )
+        counter = (
+            "反例：20 日報酬仍正、MA60／120／240 多頭支撐未破，量能也只是接近均量；"
+            "異常可能是高價股盤前深度較薄造成。缺少法人資料前，不宜斷言主力出貨。"
+        )
+    elif code == "2481":
+        title = "高風險：上跳空未抵銷中期弱勢，融資維持率已在警戒帶"
+        tone = "danger"
+        conclusion = (
+            f"{exact_distinction}。雖然開盤上跳空，但前一完整交易日已跌破 MA5／MA20／MA60，"
+            "5 日與 20 日報酬均為負，且量比放大，較像高波動下的供需失衡而非已確認轉強。"
+            f"融資維持率僅 {fmt_num(margin_current.get('maintenance_rate_pct'), 1)}%，"
+            "在警戒帶且近 20 日顯著下降；法人資料未取得，無法用法人承接證偽風險。"
+        )
+        action = (
+            "列為三檔中優先風控標的；不追跳空，需看到開盤缺口守住、成交量可延續，"
+            "且價格重新站回 MA20／MA60，才有較完整的多方確認。若缺口迅速回補，"
+            "應把異常與融資警戒視為同向風險。"
+        )
+        counter = (
+            "反例：7/23 已明顯放量，開盤又高於前收，可能是急跌後的真實買盤回補；"
+            "股價仍高於 MA120／MA240。惟沒有法人數據與完整 7/24 日 K，不能把反彈先驗認定為反轉。"
+        )
+    else:
+        title = "高風險：買一全撤、上跳空與 MA20／MA60 下方弱勢同時存在"
+        tone = "danger"
+        conclusion = (
+            f"{exact_distinction}。買一量由高峰降至零、試撮振幅近一成，"
+            "同時實際開盤上跳空；但前一日收盤仍低於 MA5／MA20／MA60，"
+            "20 日跌幅大，顯示跳空與既有下行趨勢相互衝突。"
+            f"融資維持率 {fmt_num(margin_current.get('maintenance_rate_pct'), 1)}% 在警戒帶，"
+            "近 20 日持續下降；法人資料未取得，不能確認跳空是否有中長線資金支持。"
+        )
+        action = (
+            "不追逐盤前或開盤跳空。多方需先守住缺口並站回 MA20，較強確認則是回到 MA60；"
+            "若開高走低或跌回前收，異常分數與融資警戒將形成同向風控訊號。"
+        )
+        counter = (
+            "反例：股價仍在 MA120／MA240 之上，7/23 量能接近均量，開盤跳空也可能反映真實消息需求；"
+            "但缺少法人資料與當日完整成交，不能由盤前撤單單獨否定此可能性。"
+        )
+    return {
+        "title": title,
+        "tone": tone,
+        "conclusion": conclusion,
+        "action": action,
+        "counter": counter,
+        "evidence": evidence,
+        "liquidity_grade": liquidity["grade"],
+        "signal_distinction": exact_distinction,
+    }
+
+
+def render_anomaly_stock(
+    code: str,
+    auction: dict[str, Any],
+    kbar: dict[str, Any],
+    margin_maint: dict[str, Any],
+    chips: dict[str, Any],
+    market: dict[str, Any],
+) -> tuple[str, dict[str, Any]]:
+    name = auction.get("name") or NAMES[code]
+    ksum = kbar.get("summary", {})
+    margin_current = margin_maint.get("current", {})
+    margin_trend = margin_maint.get("trend_20d", {})
+    classification = chips.get("classification", {})
+    industries = classification.get("industry_categories", [])
+    industry_text = "、".join(industries) if industries else "未取得"
+    liquidity = liquidity_assessment(kbar)
+    verdict = anomaly_evidence_and_verdict(
+        code, auction, kbar, margin_maint, chips, market, liquidity
+    )
+    open_price = finite(auction.get("open_price"))
+    disposition = chips.get("disposition", {})
+    full_cash = chips.get("full_cash_settlement", {})
+    chips_available = chips.get("availability") == "available"
+    chips_reason = chips.get("reason") or "未取得"
+    thresholds = auction.get("thresholds", {})
+    signal_labels = anomaly_label_text(auction)
+    sector_note = (
+        f"FinMind 分類：{industry_text}。本次未另建全類股橫向量價樣本，"
+        "因此可交易性只按個股成交值、量能與波動評估。"
+    )
+
+    html_out = [
+        f'<section class="stock-section anomaly-stock-section" id="stock-{code}">',
+        '<div class="section-kicker">ANOMALY STOCK · OTHER SIGNAL TYPE</div>',
+        f'<h2>{esc(code)} {esc(name)}</h2>',
+        f'<p class="signal-distinction">{esc(verdict["signal_distinction"])}</p>',
+        f'<p class="verdict {verdict["tone"]}">{esc(verdict["title"])}</p>',
+        '<div class="metrics-grid">',
+        metric(
+            "異常分數",
+            f'{fmt_num(auction.get("anomaly_score"), 0)} / 3',
+            signal_labels,
+        ),
+        metric(
+            "大單驟撤",
+            f'{fmt_num(auction.get("bid0_withdraw_pct"), 2)}%',
+            (
+                f'{fmt_num(auction.get("bid0_peak_volume"), 0)} → '
+                f'{fmt_num(auction.get("final_window_bid0_volume"), 0)} 張'
+            ),
+        ),
+        metric(
+            "試撮劇震",
+            f'{fmt_num(auction.get("bid0_swing_pct"), 2)}%',
+            (
+                f'{fmt_price(auction.get("bid0_min_price"))}–'
+                f'{fmt_price(auction.get("bid0_max_price"))} 元'
+            ),
+        ),
+        metric(
+            "開盤跳空",
+            signed(auction.get("reference_open_gap_pct"), 2, "%"),
+            f'前收 {fmt_price(auction.get("reference_price"))} → 開盤 {fmt_price(open_price)}',
+        ),
+        metric(
+            "融資維持率",
+            f'{fmt_num(margin_current.get("maintenance_rate_pct"), 1)}%',
+            str(margin_current.get("risk_level", "未取得")),
+        ),
+        metric("可交易性", esc(liquidity["grade"]), f"類股：{industry_text}"),
+        "</div>",
+        '<div class="analysis-block">',
+        '<div class="block-number">01</div><div><h3>其他異常訊號</h3>',
+        '<div class="two-col"><div><table class="data-table"><tbody>',
+        f'<tr><th>命中維度</th><td>{esc(signal_labels)}</td></tr>',
+        f'<tr><th>異常分數</th><td>{fmt_num(auction.get("anomaly_score"), 0)}</td></tr>',
+        f'<tr><th>買一量高峰 → 末筆</th><td>{fmt_num(auction.get("bid0_peak_volume"), 0)} → {fmt_num(auction.get("final_window_bid0_volume"), 0)} 張</td></tr>',
+        f'<tr><th>撤單比例</th><td>{fmt_num(auction.get("bid0_withdraw_pct"), 2)}%</td></tr>',
+        f'<tr><th>買一低 → 高／振幅</th><td>{fmt_price(auction.get("bid0_min_price"))} → {fmt_price(auction.get("bid0_max_price"))} 元／{fmt_num(auction.get("bid0_swing_pct"), 2)}%</td></tr>',
+        f'<tr><th>前收 → 開盤／跳空</th><td>{fmt_price(auction.get("reference_price"))} → {fmt_price(open_price)} 元／{signed(auction.get("reference_open_gap_pct"), 2, "%")}</td></tr>',
+        f'<tr><th>資料點</th><td>{fmt_num(auction.get("replay_points"), 0)} 個有效試撮買一點</td></tr>',
+        "</tbody></table></div>",
+        '<div class="callout"><strong>訊號性質</strong><br>',
+        esc(verdict["signal_distinction"]),
+        "<br><br>門檻未校準、可調：買一高峰至少 "
+        f"{fmt_num(thresholds.get('bid_peak_lots'), 0)} 張且剩餘比低於 "
+        f"{fmt_num((finite(thresholds.get('bid_remain_ratio')) or 0) * 100, 0)}%；"
+        f"振幅至少 {fmt_num(thresholds.get('swing_pct'), 1)}%；"
+        f"開盤跳空絕對值至少 {fmt_num(thresholds.get('gap_pct'), 1)}%。"
+        "這是觀察型異常，不是交易所委託序號級違規認定。</div></div>",
+        f'<figure>{auction_svg(auction)}<figcaption>來源：本機盤前 recorder 原始 bidask 與 detector 同口徑重算；買一量單位為張，開盤價來自 detector summary。</figcaption></figure>',
+        "</div></div>",
+        '<div class="analysis-block">',
+        '<div class="block-number">02</div><div><h3>日 K 位置與還原均線</h3>',
+        '<div class="two-col"><div><table class="data-table"><thead><tr><th>均線</th><th>還原均線值</th><th>7/24 開盤相對位置</th></tr></thead><tbody>',
+        ma_open_rows(kbar, open_price),
+        "</tbody></table></div>",
+        f'<div class="callout"><strong>{esc(ksum.get("trend", "未取得"))}</strong><br>'
+        f'{esc(ksum.get("trend_explanation", "未取得"))}<br><br>'
+        f'240 日區間位置 {fmt_num(ksum.get("position_in_240d_range_pct"), 1)}%；'
+        f'距 MA240 {signed(ksum.get("distance_to_ma240_pct"), 2, "%")}（以 7/23 收盤）。</div></div>',
+        f'<figure>{kbar_svg(kbar)}<figcaption>價格為還原權值序列；圖顯示最近 120 個有效交易日，均線由完整歷史計算。</figcaption></figure>',
+        '<p class="method-note"><strong>還原方式：</strong>'
+        f'{esc(kbar.get("adjustment_method", "未取得"))}<br><strong>資料品質：</strong>{esc(kbar_quality_note(kbar))}</p>',
+        "</div></div>",
+        '<div class="analysis-block">',
+        '<div class="block-number">03</div><div><h3>量能與流動性</h3>',
+        '<div class="metrics-grid compact">',
+        metric("7/23 成交量", f'{fmt_num(ksum.get("latest_volume_lots"), 1)} 張', ksum.get("latest_date", "")),
+        metric("20日均量", f'{fmt_num(ksum.get("volume_20d_avg_lots"), 1)} 張'),
+        metric("20日量比", f'{fmt_num(ksum.get("volume_ratio_vs_20d"), 3)}×', ksum.get("volume_signal", "未取得")),
+        metric("估算日均成交值", f'{fmt_num(liquidity["avg_turnover_m_twd"], 1)} 百萬元', "20日均量×7/23收盤"),
+        metric("20日平均日內振幅", f'{fmt_num(liquidity["range20_pct"], 2)}%', "（高－低）／收盤"),
+        "</div>",
+        f'<p>{esc(liquidity["note"])} 最新日估算成交值約 {fmt_num(liquidity["latest_turnover_m_twd"], 1)} 百萬元。'
+        "Shioaji 分鐘 K 的成交量先由張轉股再彙總，並以 Yahoo 同日量交叉檢查量級。</p>",
+        "</div></div>",
+        '<div class="analysis-block">',
+        '<div class="block-number">04</div><div><h3>融資維持率</h3>',
+        '<div class="two-col"><div><table class="data-table"><tbody>',
+        f'<tr><th>當前維持率</th><td><strong>{fmt_num(margin_current.get("maintenance_rate_pct"), 2)}%</strong></td></tr>',
+        f'<tr><th>風險等級</th><td><span class="risk-badge {risk_class(margin_current.get("risk_level"))}">{esc(margin_current.get("risk_level", "未取得"))}</span></td></tr>',
+        f'<tr><th>距 130% 追繳線</th><td>{signed(margin_current.get("buffer_to_call_pct_points"), 2, " 個百分點")}</td></tr>',
+        f'<tr><th>收盤／遞迴成本</th><td>{fmt_price(margin_current.get("close"))}／{fmt_price(margin_current.get("financing_cost"))}</td></tr>',
+        f'<tr><th>融資餘額</th><td>{fmt_num(margin_current.get("balance_lots"), 0)} 張</td></tr>',
+        f'<tr><th>近 20 日</th><td>{esc(margin_trend.get("direction", "未取得"))}；{signed(margin_trend.get("change_pct_points"), 2, " 個百分點")}</td></tr>',
+        "</tbody></table></div>",
+        '<div class="callout"><strong>既有產物，未重算</strong><br>'
+        "本區直接使用 data/analysis/margin_maint.json；維持率＝收盤價 ÷（融資成本 × 60%）× 100。"
+        "130% 以下追繳、130–150% 警戒、150–200% 正常、200% 以上安全。</div></div>",
+        f'<figure>{margin_maint_svg(margin_maint)}<figcaption>來源：既有 margin_maint.json；TWSE／TPEx 官方融資與同日收盤，截止 {esc(margin_maint.get("as_of", "未取得"))}。</figcaption></figure>',
+        "</div></div>",
+        '<div class="analysis-block">',
+        '<div class="block-number">05</div><div><h3>三大法人籌碼</h3>',
+        '<table class="data-table wide"><thead><tr><th>法人</th><th>最新日</th><th>5日</th><th>20日</th><th>連續動向</th></tr></thead><tbody>',
+        institution_table(chips),
+        "</tbody></table>",
+        f'<figure>{chips_svg(chips)}<figcaption>FinMind 法人買賣超，單位張；截止 {esc(chips.get("as_of") or "未取得")}。</figcaption></figure>',
+        (
+            '<div class="unavailable-grid"><div><strong>法人資料：</strong>未取得<br>'
+            f"<span>{esc(chips_reason)}；不以缺值推論買賣超方向。</span></div>"
+            if not chips_available
+            else '<div class="unavailable-grid"><div><strong>法人資料：</strong>已取得<br><span>依 API 實際末日彙整。</span></div>'
+        ),
+        f'<div><strong>處置狀態：</strong>{esc("未取得" if disposition.get("availability") != "available" else "已取得")}<br>'
+        f'<span>{esc(disposition.get("reason", "") if disposition.get("availability") != "available" else str(disposition.get("records", "")))}</span></div>',
+        f'<div><strong>全額交割：</strong>{esc("未取得" if full_cash.get("availability") != "available" else "已取得")}<br>'
+        f'<span>{esc(full_cash.get("reason", "") if full_cash.get("availability") != "available" else str(full_cash.get("value", "")))}</span></div>',
+        "</div></div></div>",
+        '<div class="analysis-block">',
+        '<div class="block-number">06</div><div><h3>大盤環境</h3>',
+        f'<p>截至 7/23，TAIEX 為「{esc(auditable_market_label(market))}」。'
+        f'{esc(market.get("market_regime_explanation", "未取得"))} '
+        "大盤位於長期均線之上、但短線跌破月線且 20 日報酬為負；"
+        "這會降低追逐個股跳空的容錯率，但不會把其他異常自動等同為偏空訊號。</p>",
+        f'<figure>{market_svg(market)}<figcaption>沿用 kbars.json 的 TAIEX 產物；只用至 2026-07-23 的完整日 K。</figcaption></figure>',
+        "</div></div>",
+        '<div class="analysis-block">',
+        '<div class="block-number">07</div><div><h3>可交易性與類股</h3>',
+        f'<p><strong>{esc(liquidity["grade"])}</strong>。{esc(sector_note)} {esc(liquidity["note"])}</p>',
+        '<ul class="check-list">',
+        "<li>執行：使用限價、分批；不把試撮買一量當成實際可成交深度。</li>",
+        "<li>風險：以實際開盤、完整日 K、融資維持率及可得籌碼作判斷，不由單一異常分數直接下單。</li>",
+        "<li>時點：本報告使用 7/24 開盤資訊＋7/23 盤後完整資料，未混入 7/24 未完成日 K。</li>",
+        "</ul></div></div>",
+        '<div class="analysis-block final-block">',
+        '<div class="block-number">08</div><div><h3>綜合研判</h3>',
+        f'<p class="signal-distinction">{esc(verdict["signal_distinction"])}</p>',
+        f'<p class="verdict {verdict["tone"]}">{esc(verdict["title"])}</p>',
+        f'<p>{esc(verdict["conclusion"])}</p>',
+        '<h4>數據證據鏈</h4><ol class="evidence-list">',
+        "".join(f"<li>{esc(item)}</li>" for item in verdict["evidence"]),
+        "</ol>",
+        f'<div class="decision-box"><strong>交易結論</strong><br>{esc(verdict["action"])}</div>',
+        f'<div class="counter-box"><strong>Red team／反例</strong><br>{esc(verdict["counter"])}</div>',
+        "</div></div></section>",
+    ]
+    return "".join(html_out), verdict
 
 
 def render_stock(
@@ -1118,6 +1463,8 @@ def css() -> str:
     .risk-call{background:#fee2e2;color:#991b1b}.risk-warning{background:#fef3c7;color:#92400e}
     .risk-normal{background:#dbeafe;color:#1e40af}.risk-safe{background:#d1fae5;color:#065f46}
     .risk-missing{background:#e2e8f0;color:#475569}
+    .signal-distinction{font-weight:800;color:#3e5d73;background:#eaf1f5;border:1px solid #cbd8e0;
+      border-radius:10px;padding:10px 14px}
     .verdict{font-size:17px;font-weight:800;border-left:4px solid #64748b;padding:10px 14px;background:#f8fafc}
     .verdict.danger{border-color:#b91c1c;background:#fef2f2;color:#991b1b}.verdict.warning{
       border-color:#b45309;background:#fffbeb;color:#92400e}.verdict.caution{border-color:#1d4ed8;
@@ -1169,13 +1516,15 @@ def main() -> None:
     if not isinstance(market, dict):
         raise ValueError("kbars.json missing market object")
 
-    for code in ORDER:
+    for code in MARGIN_ORDER:
         stock_or_error(kbars, code, "kbars")
         stock_or_error(margin_maint, code, "margin_maint")
         stock_or_error(chips, code, "chips")
         auction_stock = stock_or_error(auction, code, "auction")
-        if not isinstance(auction_stock.get("postopen"), dict):
+        if code in ORDER and not isinstance(auction_stock.get("postopen"), dict):
             raise ValueError(f"auction: missing postopen detail for {code}")
+        if code in ANOMALY_ORDER and auction_stock.get("signal_type") != "other_anomaly":
+            raise ValueError(f"auction: missing other anomaly detail for {code}")
 
     sections = []
     verdicts: dict[str, dict[str, Any]] = {}
@@ -1190,6 +1539,19 @@ def main() -> None:
         )
         sections.append(section)
         verdicts[code] = verdict
+    anomaly_sections = []
+    anomaly_verdicts: dict[str, dict[str, Any]] = {}
+    for code in ANOMALY_ORDER:
+        section, verdict = render_anomaly_stock(
+            code,
+            stock_or_error(auction, code, "auction"),
+            stock_or_error(kbars, code, "kbars"),
+            stock_or_error(margin_maint, code, "margin_maint"),
+            stock_or_error(chips, code, "chips"),
+            market,
+        )
+        anomaly_sections.append(section)
+        anomaly_verdicts[code] = verdict
 
     market_summary = market.get("summary", {})
     summary_rows = []
@@ -1212,35 +1574,71 @@ def main() -> None:
             f'<td>{signed(c.get("summary", {}).get("total", {}).get("last_5d", {}).get("net_lots"), 1)} 張</td>'
             f'<td>{esc(verdicts[code]["title"])}</td></tr>'
         )
+    anomaly_summary_rows = []
+    for code in ANOMALY_ORDER:
+        a = stock_or_error(auction, code, "auction")
+        k = stock_or_error(kbars, code, "kbars")
+        m = stock_or_error(margin_maint, code, "margin_maint")
+        c = stock_or_error(chips, code, "chips")
+        ks = k.get("summary", {})
+        chip5 = c.get("summary", {}).get("total", {}).get("last_5d", {}).get("net_lots")
+        anomaly_summary_rows.append(
+            "<tr>"
+            f'<td class="nowrap"><strong>{code} {esc(a.get("name", NAMES[code]))}</strong></td>'
+            f'<td>{fmt_num(a.get("anomaly_score"), 0)}／3<br><span>{esc(anomaly_label_text(a))}</span></td>'
+            f'<td>{fmt_num(a.get("bid0_withdraw_pct"), 2)}%</td>'
+            f'<td>{fmt_num(a.get("bid0_swing_pct"), 2)}%</td>'
+            f'<td class="{tone_class(a.get("reference_open_gap_pct"))}">{signed(a.get("reference_open_gap_pct"), 2, "%")}</td>'
+            f'<td>{esc(ks.get("trend", "未取得"))}<br>20日 {signed(ks.get("returns", {}).get("20d_pct"), 2, "%")}</td>'
+            f'<td>{fmt_num(ks.get("volume_ratio_vs_20d"), 3)}×</td>'
+            f'<td>{fmt_num(m.get("current", {}).get("maintenance_rate_pct"), 1)}%<br>'
+            f'<span class="risk-badge {risk_class(m.get("current", {}).get("risk_level"))}">'
+            f'{esc(m.get("current", {}).get("risk_level", "未取得"))}</span></td>'
+            f'<td>{("未取得" if c.get("availability") != "available" else signed(chip5, 1) + " 張")}</td>'
+            f'<td>{esc(anomaly_verdicts[code]["title"])}</td></tr>'
+        )
     margin_maintenance_section = render_margin_maintenance_section(margin_maint)
 
     unavailable = [
-        "FinMind TaiwanStockPriceAdj：會員資料未取得；已以 FinMind 原始 OHLCV × Yahoo 同日 adjclose/close 因子等價還原，未使用未還原價計算均線。",
-        "處置股：FinMind 免費層無權限，三檔均標示未取得。",
-        "全額交割股：本次指定資料源無可靠欄位，三檔均標示未取得。",
+        "FinMind TaiwanStockPriceAdj：會員資料未取得；舊三檔以 FinMind 原始 OHLCV、新增三檔在 FinMind 限流後以 Shioaji 分鐘 K 聚合日 K，再乘 Yahoo 同日 adjclose/close 因子等價還原，未使用未還原價計算均線。",
+        "處置股：FinMind 免費層無權限，六檔均標示未取得。",
+        "全額交割股：本次指定資料源無可靠欄位，六檔均標示未取得。",
         "完整類股橫向強弱／類股成交深度：未另抓取；只提供 FinMind 產業分類與個股可交易性。",
     ]
+    missing_anomaly_chips = [
+        code
+        for code in ANOMALY_ORDER
+        if stock_or_error(chips, code, "chips").get("availability") != "available"
+    ]
+    if missing_anomaly_chips:
+        unavailable.insert(
+            1,
+            "／".join(missing_anomaly_chips)
+            + " 三大法人：FinMind 已退避重試仍未取得；報告明確留白，不推論方向。",
+        )
     generated = datetime.now().astimezone().isoformat(timespec="seconds")
     document = f"""<!doctype html>
 <html lang="zh-Hant">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>2026-07-24 疑似假試撮重點股票完整分析</title>
+<title>2026-07-24 疑似假試撮與其他異常標的完整分析</title>
 <style>{css()}</style>
 </head>
 <body>
 <main class="report">
   <header class="hero">
     <div class="eyebrow">PRE-OPEN AUCTION RESEARCH · 2026-07-24</div>
-    <h1>疑似假試撮重點股票完整分析</h1>
-    <p class="subtitle">盤前偵測出的 3 檔重點股維持完整分析，並把 8039、2392、2201、6488、2481、6147 六檔的融資維度升級為 CMoney 式遞迴維持率。以原始試撮價量、09:03–09:05 開盤後買一、還原日 K、量能、官方融資維持率、三大法人與大盤位置建立可稽核的證據鏈。</p>
+    <h1>疑似假試撮與其他異常標的完整分析</h1>
+    <p class="subtitle">盤前偵測出的 3 檔疑似假試撮與 3 檔其他異常股均做完整分析。六檔皆納入還原日 K、MA5/20/60/120/240、量能、既有融資維持率、三大法人與大盤位置；其他異常另呈現大單驟撤、試撮劇震、開盤跳空與異常分數，並與「試撮鎖漲停」明確區分。</p>
     <span class="asof">事件日 2026-07-24 · 開盤後觀測至 09:05 · 完整盤後資料截止 2026-07-23</span>
   </header>
   <nav class="nav" aria-label="報告導覽">
-    <a href="#overview">大盤與總覽</a><a href="#margin-maintenance">六檔融資維持率</a>
+    <a href="#overview">大盤與總覽</a><a href="#anomaly-overview">異常標的深入分析</a><a href="#margin-maintenance">六檔融資維持率</a>
     <a href="#stock-8039">8039 台虹</a>
     <a href="#stock-2392">2392 正崴</a><a href="#stock-2201">2201 裕隆</a>
+    <a href="#stock-6488">6488 環球晶</a><a href="#stock-2481">2481 強茂</a>
+    <a href="#stock-6147">6147 頎邦</a>
     <a href="#method">方法與限制</a>
   </nav>
   <section class="overview" id="overview">
@@ -1262,8 +1660,19 @@ def main() -> None:
       <tbody>{''.join(summary_rows)}</tbody>
     </table></div>
   </section>
+  <section class="overview" id="anomaly-overview">
+    <div class="section-kicker">OTHER ANOMALIES · DEEP DIVE</div>
+    <h2>異常標的深入分析</h2>
+    <p class="signal-distinction">此為其他異常＝大單驟撤/試撮劇震/開盤跳空，非試撮鎖漲停，訊號性質不同。</p>
+    <p>三檔皆命中大單驟撤、試撮劇震與開盤跳空三個觀察維度；門檻未校準、可調。異常分數只表示命中維度數，不代表違規認定，也不能取代日 K、量能、融資、法人與大盤環境的完整判讀。</p>
+    <div class="summary-scroll"><table class="summary-table">
+      <thead><tr><th>股票</th><th>分數／命中</th><th>撤單</th><th>振幅</th><th>開盤跳空</th><th>日K位置</th><th>量比</th><th>融資維持率</th><th>法人5日</th><th>綜合研判</th></tr></thead>
+      <tbody>{''.join(anomaly_summary_rows)}</tbody>
+    </table></div>
+  </section>
   {margin_maintenance_section}
   {''.join(sections)}
+  {''.join(anomaly_sections)}
   <section class="methodology" id="method">
     <div class="section-kicker">METHOD & LIMITATIONS</div>
     <h2>方法、資料血統與未取得項目</h2>
@@ -1286,7 +1695,7 @@ def main() -> None:
 """
     args.output.write_text(document, encoding="utf-8")
     print(f"wrote {args.output} ({args.output.stat().st_size:,} bytes)")
-    print("stocks:", ", ".join(f"{code} {NAMES[code]}" for code in ORDER))
+    print("stocks:", ", ".join(f"{code} {NAMES[code]}" for code in MARGIN_ORDER))
 
 
 if __name__ == "__main__":

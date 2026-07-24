@@ -430,6 +430,12 @@
     .anomaly-panel {
       margin-bottom: 18px;
       overflow: hidden;
+      border-color: #B9CBD6;
+      box-shadow: 0 14px 34px rgba(62, 93, 115, 0.11);
+    }
+
+    .anomaly-panel .panel-header {
+      background: linear-gradient(90deg, rgba(234, 241, 245, 0.88), rgba(255, 255, 255, 0.96));
     }
 
     .anomaly-heading {
@@ -447,9 +453,9 @@
       display: grid;
       grid-template-columns: repeat(3, minmax(0, 1fr));
       min-width: 0;
-      gap: 10px;
-      padding: 12px 14px 14px;
-      background: linear-gradient(180deg, rgba(234, 241, 245, 0.42), transparent);
+      gap: 12px;
+      padding: 16px;
+      background: linear-gradient(180deg, rgba(234, 241, 245, 0.6), rgba(255, 255, 255, 0.3));
     }
 
     .anomaly-grid > .empty-state {
@@ -457,11 +463,22 @@
     }
 
     .anomaly-card {
+      position: relative;
       min-width: 0;
-      padding: 13px 14px;
+      overflow: hidden;
+      padding: 17px 18px 16px;
       border: 1px solid #CBD8E0;
-      border-radius: var(--radius-md);
-      background: rgba(255, 255, 255, 0.94);
+      border-radius: var(--radius-lg);
+      background: rgba(255, 255, 255, 0.98);
+      box-shadow: 0 7px 18px rgba(62, 93, 115, 0.08);
+    }
+
+    .anomaly-card::before {
+      position: absolute;
+      inset: 0 0 auto;
+      height: 4px;
+      background: var(--anomaly);
+      content: "";
     }
 
     .anomaly-card-head {
@@ -470,13 +487,13 @@
       justify-content: space-between;
       min-width: 0;
       gap: 10px;
-      margin-bottom: 9px;
+      margin-bottom: 11px;
     }
 
     .anomaly-stock {
       min-width: 0;
       overflow: hidden;
-      font-size: 0.85rem;
+      font-size: 1rem;
       font-weight: 850;
       text-overflow: ellipsis;
       white-space: nowrap;
@@ -484,23 +501,67 @@
 
     .anomaly-score {
       flex: 0 0 auto;
+      padding: 4px 8px;
+      border: 1px solid #BED0DA;
+      border-radius: 999px;
+      background: var(--anomaly-soft);
       color: var(--anomaly);
       font-family: Georgia, ui-serif, serif;
-      font-size: 0.78rem;
+      font-size: 0.75rem;
       font-weight: 800;
     }
 
-    .anomaly-detail-list {
-      display: grid;
+    .anomaly-hit-list {
+      display: flex;
+      flex-wrap: wrap;
       gap: 6px;
+      min-height: 22px;
+      margin-bottom: 13px;
     }
 
-    .anomaly-detail {
+    .anomaly-metrics {
       display: grid;
-      grid-template-columns: auto minmax(0, 1fr);
-      align-items: baseline;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
       min-width: 0;
-      gap: 7px;
+      overflow: hidden;
+      border: 1px solid #D9E3E9;
+      border-radius: var(--radius-md);
+      background: #F8FBFC;
+    }
+
+    .anomaly-metric {
+      min-width: 0;
+      padding: 10px 9px 9px;
+      border-right: 1px solid #D9E3E9;
+    }
+
+    .anomaly-metric:last-child {
+      border-right: 0;
+    }
+
+    .anomaly-metric-label {
+      color: var(--muted);
+      font-size: 0.64rem;
+      font-weight: 800;
+      letter-spacing: 0.04em;
+    }
+
+    .anomaly-metric-value {
+      margin-top: 2px;
+      color: #314E62;
+      font-family: Georgia, ui-serif, serif;
+      font-size: 1.12rem;
+      font-weight: 850;
+      line-height: 1.2;
+    }
+
+    .anomaly-metric-note {
+      min-height: 28px;
+      margin-top: 3px;
+      color: #7A7B78;
+      font-size: 0.58rem;
+      line-height: 1.25;
+      overflow-wrap: anywhere;
     }
 
     .anomaly-chip {
@@ -517,11 +578,11 @@
       white-space: nowrap;
     }
 
-    .anomaly-numbers {
-      min-width: 0;
-      color: #5F6263;
-      font-size: 0.69rem;
-      overflow-wrap: anywhere;
+    .anomaly-card-note {
+      margin: 10px 0 0;
+      color: #6F7476;
+      font-size: 0.66rem;
+      line-height: 1.45;
     }
 
     .stock-grid {
@@ -1100,7 +1161,7 @@
     <section class="panel anomaly-panel" aria-labelledby="anomalies-title">
       <header class="panel-header">
         <div class="anomaly-heading">
-          <h2 class="panel-title" id="anomalies-title">其他異常標的（觀察用）</h2>
+          <h2 class="panel-title" id="anomalies-title">異常標的重點卡片（異常分數 ≥ 2）</h2>
           <p class="calibration-note" id="anomaly-threshold-note">
             暫定門檻：峰值 ≥300 張且撤 ≥70%、振幅 ≥5%、跳空 ≥4%；門檻未經真實資料校準、可調。
           </p>
@@ -1110,7 +1171,7 @@
       <div class="anomaly-grid" id="anomaly-grid" aria-live="polite">
         <div class="empty-state">
           <span class="empty-icon" aria-hidden="true">◇</span>
-          尚未命中其他異常維度
+          尚無異常分數 ≥ 2 的標的
         </div>
       </div>
     </section>
@@ -1362,7 +1423,7 @@
 
       function renderAnomalies(stocks, thresholds) {
         const anomalous = stocks
-          .filter((stock) => Array.isArray(stock.anomalies) && stock.anomalies.length > 0)
+          .filter((stock) => (finiteNumber(stock.anomaly_score) ?? 0) >= 2)
           .sort((left, right) => {
             const scoreDiff = (finiteNumber(right.anomaly_score) ?? 0)
               - (finiteNumber(left.anomaly_score) ?? 0);
@@ -1386,7 +1447,7 @@
           const empty = makeElement("div", "empty-state");
           empty.append(
             makeElement("span", "empty-icon", "◇"),
-            document.createTextNode("尚未命中其他異常維度")
+            document.createTextNode("尚無異常分數 ≥ 2 的標的")
           );
           elements.anomalyGrid.append(empty);
           return;
@@ -1394,6 +1455,10 @@
 
         anomalous.forEach((stock) => {
           const card = makeElement("article", "anomaly-card");
+          card.setAttribute(
+            "aria-label",
+            `${safeText(stock.code)} ${safeText(stock.name, "")}，異常分數 ${formatVolume(stock.anomaly_score)}`
+          );
           const head = makeElement("div", "anomaly-card-head");
           head.append(
             makeElement(
@@ -1407,17 +1472,51 @@
               `異常分數 ${formatVolume(stock.anomaly_score)}`
             )
           );
-          const details = makeElement("div", "anomaly-detail-list");
-          stock.anomalies.forEach((dimension) => {
-            const descriptor = anomalyDetails(stock, dimension);
-            const row = makeElement("div", "anomaly-detail");
-            row.append(
-              makeElement("span", "anomaly-chip", descriptor.label),
-              makeElement("span", "anomaly-numbers", descriptor.numbers)
+          const hits = makeElement("div", "anomaly-hit-list");
+          const dimensions = Array.isArray(stock.anomalies) ? stock.anomalies : [];
+          dimensions.forEach((dimension) => {
+            hits.append(
+              makeElement("span", "anomaly-chip", anomalyDetails(stock, dimension).label)
             );
-            details.append(row);
           });
-          card.append(head, details);
+          const metrics = makeElement("div", "anomaly-metrics");
+          [
+            {
+              label: "撤單 %",
+              value: formatPercent(stock.bid0_withdraw_pct),
+              note:
+                `${formatVolume(stock.bid0_peak_volume)} → ` +
+                `${formatVolume(stock.final_window_bid0_volume)} 張`
+            },
+            {
+              label: "振幅 %",
+              value: formatPercent(stock.bid0_swing_pct),
+              note:
+                `${formatPrice(stock.bid0_min_price)}–` +
+                `${formatPrice(stock.bid0_max_price)}`
+            },
+            {
+              label: "開盤跳空 %",
+              value: formatPercent(stock.reference_open_gap_pct, true),
+              note:
+                `${formatPrice(stock.reference)} → ` +
+                `${formatPrice(stock.open_price)}`
+            }
+          ].forEach((item) => {
+            const metric = makeElement("div", "anomaly-metric");
+            metric.append(
+              makeElement("div", "anomaly-metric-label", item.label),
+              makeElement("div", "anomaly-metric-value", item.value),
+              makeElement("div", "anomaly-metric-note", item.note)
+            );
+            metrics.append(metric);
+          });
+          const note = makeElement(
+            "p",
+            "anomaly-card-note",
+            "其他異常觀察用；非試撮鎖漲停。門檻未校準、可調。"
+          );
+          card.append(head, hits, metrics, note);
           elements.anomalyGrid.append(card);
         });
       }
@@ -1725,7 +1824,10 @@
         setCount(elements.countHeld, counts.locked_held);
         setCount(elements.countTouched, counts.touched);
         setCount(elements.countWatching, counts.watching);
-        setCount(elements.countAnomaly, counts.anomaly);
+        setCount(
+          elements.countAnomaly,
+          stocks.filter((stock) => (finiteNumber(stock.anomaly_score) ?? 0) >= 2).length
+        );
         elements.stockSummary.textContent =
           `標的 ${numberFormatter.format(universe)} 檔・已訂閱 ${numberFormatter.format(subscribed)} 檔`;
         if (service === "error") {

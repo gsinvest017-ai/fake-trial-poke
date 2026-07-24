@@ -1,22 +1,26 @@
 #!/usr/bin/env python3
-"""建立三檔重點股與 TAIEX 的還原日 K、均線及量價摘要。
+"""建立六檔重點／異常股與 TAIEX 的還原日 K、均線及量價摘要。
 
 資料紀律：
 1. 個股優先使用 FinMind TaiwanStockPriceAdj。
-2. 若該會員資料表不可用，使用 FinMind TaiwanStockPrice 原始 OHLCV，逐日乘上
-   Yahoo Finance 同日 adjclose / close 的調整因子；不以未還原價格計算均線。
-3. TAIEX 使用 FinMind TaiwanStockPrice(data_id=TAIEX)。指數不是公司證券，
+2. 若該會員資料表不可用，使用 FinMind TaiwanStockPrice 原始 OHLCV；若 FinMind
+   限流或無資料，改以 Shioaji 1 分 K 聚合日 K（成交量由張轉股）。
+3. 原始價格逐日乘上 Yahoo Finance 同日 adjclose / close 的調整因子；不以未還原
+   價格計算均線。
+4. TAIEX 使用 FinMind TaiwanStockPrice(data_id=TAIEX)。指數不是公司證券，
    不適用個股除權息調整。
-4. 所有網路 response 都先寫進 data/analysis/cache，再由快取重跑。
-5. 分析硬截止 2026-07-23，排除 2026-07-24 未完成日 K。
+5. 所有網路 response 都先寫進 data/analysis/cache，再由快取重跑。
+6. 分析硬截止 2026-07-23，排除 2026-07-24 未完成日 K。
 
-只依賴 Python 標準函式庫，可獨立執行：
+FinMind／Yahoo 路徑只依賴標準函式庫；Shioaji 備援使用專案既有套件：
     python data/analysis/analyze_kbars.py
 """
 
 from __future__ import annotations
 
 import argparse
+import contextlib
+import io
 import json
 import math
 import os
@@ -46,6 +50,9 @@ STOCKS = {
     "8039": {"name": "台虹", "yahoo_symbol": "8039.TW"},
     "2392": {"name": "正崴", "yahoo_symbol": "2392.TW"},
     "2201": {"name": "裕隆", "yahoo_symbol": "2201.TW"},
+    "6488": {"name": "環球晶", "yahoo_symbol": "6488.TWO"},
+    "2481": {"name": "強茂", "yahoo_symbol": "2481.TW"},
+    "6147": {"name": "頎邦", "yahoo_symbol": "6147.TWO"},
 }
 MA_WINDOWS = (5, 20, 60, 120, 240)
 MINIMUM_REQUIRED_ROWS = max(MA_WINDOWS)
@@ -145,15 +152,19 @@ def cached_get_json(
     refresh: bool = False,
     max_attempts: int = 5,
 ) -> FetchResult:
-    """GET JSON 並快取 response；HTTP/業務狀態 402 採指數退避。"""
+    """GET JSON 並快取 response；認證、限流與暫時性錯誤採指數退避。"""
     cache_path = CACHE_DIR / f"kbars__{cache_key}.json"
     if cache_path.exists() and not refresh:
         try:
             envelope = read_json(cache_path)
             status_code = safe_int(envelope.get("status_code"))
             business_status = safe_int(envelope.get("business_status"))
-            # 402 不視為可重用快取，讓重跑有機會恢復。
-            if status_code != 402 and business_status != 402:
+            # 認證／限流／暫時性錯誤不視為可重用快取，讓重跑有機會恢復。
+            if (
+                status_code not in {401, 402, 429}
+                and business_status not in {401, 402, 429}
+                and not (status_code is not None and status_code >= 500)
+            ):
                 return FetchResult(
                     ok=bool(envelope.get("ok")),
                     payload=envelope.get("response_json"),
@@ -219,7 +230,11 @@ def cached_get_json(
         except (URLError, TimeoutError, OSError, ValueError) as exc:
             error = sanitize_error(f"{type(exc).__name__}: {exc}")
 
-        retry_402 = status_code == 402 or business_status == 402
+        retryable = (
+            status_code in {401, 402, 429}
+            or business_status in {401, 402, 429}
+            or (status_code is not None and status_code >= 500)
+        )
         ok = error is None and isinstance(response_json, dict)
         envelope = {
             "schema_version": 1,
@@ -248,7 +263,7 @@ def cached_get_json(
             error=error,
             fetched_at=fetched_at,
         )
-        if ok or not retry_402 or attempt >= max_attempts:
+        if ok or not retryable or attempt >= max_attempts:
             return last_result
         time.sleep(min(2 ** (attempt - 1), 16))
 
@@ -324,6 +339,226 @@ def source_attempt(result: FetchResult) -> dict[str, Any]:
         "fetched_at": result.fetched_at,
         "error": result.error,
     }
+
+
+class ShioajiPriceFallback:
+    """以唯讀 Shioaji 分鐘 K 聚合日 K；登入一次、每檔分 30 日查詢並快取。"""
+
+    def __init__(self, env_values: dict[str, str], *, refresh: bool) -> None:
+        self.api_key = (
+            os.environ.get("SHIOAJI_API_KEY")
+            or env_values.get("SHIOAJI_API_KEY")
+            or ""
+        ).strip()
+        self.secret_key = (
+            os.environ.get("SHIOAJI_SECRET_KEY")
+            or env_values.get("SHIOAJI_SECRET_KEY")
+            or ""
+        ).strip()
+        self.refresh = refresh
+        self._api: Any | None = None
+        self._login_error: str | None = None
+
+    def _cache_path(self, ticker: str) -> Path:
+        return CACHE_DIR / (
+            f"kbars__shioaji__TaiwanStockKbars__{ticker}__"
+            f"{START_DATE.isoformat()}__{CUTOFF_DATE.isoformat()}.json"
+        )
+
+    def has_success_cache(self, ticker: str) -> bool:
+        if self.refresh:
+            return False
+        path = self._cache_path(ticker)
+        if not path.exists():
+            return False
+        try:
+            envelope = read_json(path)
+        except (OSError, ValueError, TypeError):
+            return False
+        return bool(envelope.get("ok")) and isinstance(envelope.get("rows"), list)
+
+    def _ensure_api(self) -> Any:
+        if self._api is not None:
+            return self._api
+        if self._login_error:
+            raise RuntimeError(self._login_error)
+        if not self.api_key or not self.secret_key:
+            self._login_error = "Shioaji 憑證未設定"
+            raise RuntimeError(self._login_error)
+        try:
+            os.environ.setdefault("LOGURU_LEVEL", "ERROR")
+            os.environ.setdefault("LOG_SENTRY", "")
+            import shioaji as sj
+
+            api = sj.Shioaji()
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(
+                io.StringIO()
+            ):
+                api.login(
+                    api_key=self.api_key,
+                    secret_key=self.secret_key,
+                    fetch_contract=True,
+                    contracts_timeout=30_000,
+                    subscribe_trade=False,
+                )
+            self._api = api
+            return api
+        except Exception as exc:
+            self._login_error = sanitize_error(
+                f"Shioaji login {type(exc).__name__}: {exc}"
+            )
+            raise RuntimeError(self._login_error) from exc
+
+    @staticmethod
+    def _series(value: Any) -> list[Any]:
+        if value is None:
+            return []
+        try:
+            return list(value)
+        except TypeError:
+            return [value]
+
+    def fetch(self, ticker: str) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        cache_path = self._cache_path(ticker)
+        if self.has_success_cache(ticker):
+            envelope = read_json(cache_path)
+            rows = envelope["rows"]
+            if envelope.get("volume_unit") != "shares":
+                rows = [dict(row) for row in rows]
+                for row in rows:
+                    volume_lots = safe_int(row.get("volume"))
+                    row["volume"] = (
+                        volume_lots * 1000 if volume_lots is not None else None
+                    )
+                envelope["schema_version"] = 2
+                envelope["volume_unit"] = "shares"
+                envelope["rows"] = rows
+                atomic_write_json(cache_path, envelope)
+            return envelope["rows"], {
+                "source": "Shioaji api.kbars（1 分 K 聚合日 K）",
+                "available": True,
+                "status_code": None,
+                "from_cache": True,
+                "cache_file": str(cache_path.relative_to(PROJECT_DIR)),
+                "fetched_at": envelope.get("fetched_at"),
+                "error": None,
+            }
+
+        fetched_at = now_iso()
+        try:
+            api = self._ensure_api()
+            contract = api.Contracts.Stocks[ticker]
+            minute_rows: list[tuple[int, float, float, float, float, int]] = []
+            cursor = START_DATE
+            query_count = 0
+            while cursor <= CUTOFF_DATE:
+                chunk_end = min(cursor + timedelta(days=29), CUTOFF_DATE)
+                with contextlib.redirect_stdout(
+                    io.StringIO()
+                ), contextlib.redirect_stderr(io.StringIO()):
+                    bars = api.kbars(
+                        contract,
+                        start=cursor.isoformat(),
+                        end=chunk_end.isoformat(),
+                    )
+                fields = {
+                    key: self._series(getattr(bars, key, None))
+                    for key in ("ts", "Open", "High", "Low", "Close", "Volume")
+                }
+                count = min((len(values) for values in fields.values()), default=0)
+                for index in range(count):
+                    ts = safe_int(fields["ts"][index])
+                    open_price = safe_float(fields["Open"][index])
+                    high = safe_float(fields["High"][index])
+                    low = safe_float(fields["Low"][index])
+                    close = safe_float(fields["Close"][index])
+                    volume = safe_int(fields["Volume"][index])
+                    if (
+                        ts is None
+                        or None in (open_price, high, low, close, volume)
+                        or min(open_price, high, low, close) <= 0
+                        or volume < 0
+                    ):
+                        continue
+                    # Shioaji 股票 kbars Volume 單位為張；統一轉成股。
+                    minute_rows.append(
+                        (ts, open_price, high, low, close, volume * 1000)
+                    )
+                query_count += 1
+                cursor = chunk_end + timedelta(days=1)
+
+            minute_rows.sort(key=lambda row: row[0])
+            daily: dict[str, dict[str, Any]] = {}
+            for ts, open_price, high, low, close, volume in minute_rows:
+                # Shioaji ts 為交易所壁鐘編碼；依既有 probe 驗證，不再 +8。
+                day = datetime.fromtimestamp(ts / 1e9, timezone.utc).date()
+                if not START_DATE <= day <= CUTOFF_DATE:
+                    continue
+                day_text = day.isoformat()
+                if day_text not in daily:
+                    daily[day_text] = {
+                        "date": day_text,
+                        "open": open_price,
+                        "high": high,
+                        "low": low,
+                        "close": close,
+                        "volume": volume,
+                    }
+                else:
+                    row = daily[day_text]
+                    row["high"] = max(float(row["high"]), high)
+                    row["low"] = min(float(row["low"]), low)
+                    row["close"] = close
+                    row["volume"] = int(row["volume"]) + volume
+            rows = [daily[key] for key in sorted(daily)]
+            if not rows:
+                raise DataQualityError("Shioaji kbars 無可用分鐘 K")
+            envelope = {
+                "schema_version": 2,
+                "source": "Shioaji api.kbars",
+                "ticker": ticker,
+                "start_date": START_DATE.isoformat(),
+                "end_date": CUTOFF_DATE.isoformat(),
+                "fetched_at": fetched_at,
+                "ok": True,
+                "query_count": query_count,
+                "minute_row_count": len(minute_rows),
+                "volume_unit": "shares",
+                "rows": rows,
+            }
+            atomic_write_json(cache_path, envelope)
+            return rows, {
+                "source": "Shioaji api.kbars（1 分 K 聚合日 K）",
+                "available": True,
+                "status_code": None,
+                "from_cache": False,
+                "cache_file": str(cache_path.relative_to(PROJECT_DIR)),
+                "fetched_at": fetched_at,
+                "error": None,
+            }
+        except Exception as exc:
+            error = sanitize_error(f"{type(exc).__name__}: {exc}")
+            return [], {
+                "source": "Shioaji api.kbars（1 分 K 聚合日 K）",
+                "available": False,
+                "status_code": None,
+                "from_cache": False,
+                "cache_file": None,
+                "fetched_at": fetched_at,
+                "error": error,
+            }
+
+    def close(self) -> None:
+        if self._api is None:
+            return
+        try:
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(
+                io.StringIO()
+            ):
+                self._api.logout()
+        except Exception:
+            pass
+        self._api = None
 
 
 def finmind_rows(result: FetchResult) -> list[dict[str, Any]]:
@@ -429,11 +664,13 @@ def yahoo_adjustment_factors(
     ):
         return factors, details
     closes = quotes[0].get("close")
+    quote_volumes = quotes[0].get("volume")
     adj_closes = adjusted[0].get("adjclose")
     if not isinstance(closes, list) or not isinstance(adj_closes, list):
         return factors, details
     count = min(len(timestamps), len(closes), len(adj_closes))
     details["rows_seen"] = count
+    latest_yahoo_volume: tuple[str, int] | None = None
     for index in range(count):
         ts = safe_int(timestamps[index])
         close = safe_float(closes[index])
@@ -447,10 +684,20 @@ def yahoo_adjustment_factors(
         if factor <= 0 or not math.isfinite(factor):
             continue
         factors[local_date.isoformat()] = factor
+        if isinstance(quote_volumes, list) and index < len(quote_volumes):
+            volume = safe_int(quote_volumes[index])
+            if volume is not None and volume >= 0:
+                latest_yahoo_volume = (local_date.isoformat(), volume)
     factor_values = list(factors.values())
     details["valid_factors"] = len(factor_values)
     details["min_factor"] = rounded(min(factor_values), 8) if factor_values else None
     details["max_factor"] = rounded(max(factor_values), 8) if factor_values else None
+    details["latest_yahoo_volume_date"] = (
+        latest_yahoo_volume[0] if latest_yahoo_volume else None
+    )
+    details["latest_yahoo_volume_shares"] = (
+        latest_yahoo_volume[1] if latest_yahoo_volume else None
+    )
     return factors, details
 
 
@@ -769,13 +1016,27 @@ def build_stock(
     metadata: dict[str, str],
     *,
     finmind_token: str,
+    shioaji_fallback: ShioajiPriceFallback,
     refresh: bool,
 ) -> dict[str, Any]:
     attempts: list[dict[str, Any]] = []
-    adj_result = finmind_get(
-        "TaiwanStockPriceAdj", ticker, token=finmind_token, refresh=refresh
-    )
-    attempts.append(source_attempt(adj_result))
+    prefer_shioaji_cache = shioaji_fallback.has_success_cache(ticker)
+    if prefer_shioaji_cache:
+        adj_result = FetchResult(
+            ok=False,
+            payload=None,
+            source="FinMind TaiwanStockPriceAdj",
+            cache_file="",
+            status_code=None,
+            from_cache=False,
+            error="已有成功 Shioaji 價格快取，本次跳過 FinMind 重試",
+            fetched_at=None,
+        )
+    else:
+        adj_result = finmind_get(
+            "TaiwanStockPriceAdj", ticker, token=finmind_token, refresh=refresh
+        )
+        attempts.append(source_attempt(adj_result))
     adjustment_method: str
     factor_details: dict[str, Any] | None = None
     missing_factor_dates: list[str] = []
@@ -793,14 +1054,31 @@ def build_stock(
             "計算所有均線。"
         )
     else:
-        raw_result = finmind_get(
-            "TaiwanStockPrice", ticker, token=finmind_token, refresh=refresh
-        )
-        attempts.append(source_attempt(raw_result))
-        if not raw_result.ok or not finmind_rows(raw_result):
-            error = raw_result.error or "FinMind TaiwanStockPrice 無資料"
-            return unavailable_stock(ticker, metadata["name"], attempts, error)
-        raw_rows = normalize_finmind_price_rows(finmind_rows(raw_result), ticker)
+        raw_result: FetchResult | None = None
+        raw_rows: list[dict[str, Any]] = []
+        if not prefer_shioaji_cache:
+            raw_result = finmind_get(
+                "TaiwanStockPrice", ticker, token=finmind_token, refresh=refresh
+            )
+            attempts.append(source_attempt(raw_result))
+            if raw_result.ok and finmind_rows(raw_result):
+                raw_rows = normalize_finmind_price_rows(
+                    finmind_rows(raw_result), ticker
+                )
+        if not raw_rows:
+            raw_rows, shioaji_attempt = shioaji_fallback.fetch(ticker)
+            attempts.append(shioaji_attempt)
+        if not raw_rows:
+            error = (
+                shioaji_attempt.get("error")
+                if "shioaji_attempt" in locals()
+                else raw_result.error
+                if raw_result is not None
+                else "FinMind／Shioaji 均無資料"
+            )
+            return unavailable_stock(
+                ticker, metadata["name"], attempts, error or "價格資料未取得"
+            )
         raw_rows, dropped_zero_ohlcv_dates = drop_zero_ohlcv_placeholders(raw_rows)
         try:
             raw_quality = validate_rows(raw_rows, f"{ticker} FinMind raw")
@@ -814,14 +1092,44 @@ def build_stock(
             error = yahoo_result.error or "Yahoo adjustment factor 無資料"
             return unavailable_stock(ticker, metadata["name"], attempts, error)
         inferred_factor_dates = interpolate_stable_factor_gaps(raw_rows, factors)
+        if raw_rows:
+            latest_raw = raw_rows[-1]
+            latest_raw_volume = safe_int(latest_raw.get("volume"))
+            yahoo_volume = safe_int(
+                factor_details.get("latest_yahoo_volume_shares")
+            )
+            yahoo_volume_date = factor_details.get("latest_yahoo_volume_date")
+            if (
+                latest_raw.get("date") == yahoo_volume_date
+                and latest_raw_volume is not None
+                and yahoo_volume not in (None, 0)
+            ):
+                factor_details["latest_volume_crosscheck"] = {
+                    "date": yahoo_volume_date,
+                    "source_volume_shares": latest_raw_volume,
+                    "yahoo_volume_shares": yahoo_volume,
+                    "difference_pct": rounded(
+                        (latest_raw_volume / yahoo_volume - 1.0) * 100.0,
+                        4,
+                    ),
+                }
         factor_details["stable_gap_interpolation_tolerance"] = 1e-5
         factor_details["stable_gap_interpolated_count"] = len(
             inferred_factor_dates
         )
         factor_details["stable_gap_interpolated_dates"] = inferred_factor_dates
         rows, missing_factor_dates = apply_adjustment(raw_rows, factors)
+        raw_source_name = (
+            "Shioaji api.kbars 1 分 K 聚合日 K"
+            if any(
+                attempt.get("source", "").startswith("Shioaji")
+                and attempt.get("available")
+                for attempt in attempts
+            )
+            else "FinMind TaiwanStockPrice 原始 OHLCV"
+        )
         adjustment_method = (
-            "FinMind TaiwanStockPrice 原始 OHLCV × Yahoo Finance 同交易日 "
+            f"{raw_source_name} × Yahoo Finance 同交易日 "
             "adjclose/close 調整因子；逐日對齊後才計算 MA5/20/60/120/240，"
             "Yahoo 單日空洞只在前後因子相對差 <=1e-5 時以兩側平均因子補值，"
             "否則該日期排除，絕不以未還原價遞補。"
@@ -861,7 +1169,15 @@ def build_stock(
         "status": "available",
         "error": None,
         "adjustment_method": adjustment_method,
-        "price_source": "FinMind",
+        "price_source": (
+            "Shioaji"
+            if any(
+                attempt.get("source", "").startswith("Shioaji")
+                and attempt.get("available")
+                for attempt in attempts
+            )
+            else "FinMind"
+        ),
         "adjustment_factor_source": (
             "FinMind TaiwanStockPriceAdj"
             if factor_details is None
@@ -1030,13 +1346,20 @@ def main(argv: list[str] | None = None) -> int:
     ).strip()
 
     stocks: dict[str, dict[str, Any]] = {}
-    for ticker, metadata in STOCKS.items():
-        stocks[ticker] = build_stock(
-            ticker,
-            metadata,
-            finmind_token=finmind_token,
-            refresh=bool(args.refresh),
-        )
+    shioaji_fallback = ShioajiPriceFallback(
+        env_values, refresh=bool(args.refresh)
+    )
+    try:
+        for ticker, metadata in STOCKS.items():
+            stocks[ticker] = build_stock(
+                ticker,
+                metadata,
+                finmind_token=finmind_token,
+                shioaji_fallback=shioaji_fallback,
+                refresh=bool(args.refresh),
+            )
+    finally:
+        shioaji_fallback.close()
     market = build_market(finmind_token=finmind_token, refresh=bool(args.refresh))
 
     unavailable = [
@@ -1057,7 +1380,9 @@ def main(argv: list[str] | None = None) -> int:
             ),
             "stock_adjustment": (
                 "優先 FinMind TaiwanStockPriceAdj；不可用時，以 FinMind 原始 "
-                "OHLCV 逐日乘 Yahoo adjclose/close 因子。Yahoo 空洞僅在兩側因子"
+                "OHLCV 逐日乘 Yahoo adjclose/close 因子；FinMind 限流或無資料時，"
+                "以 Shioaji 1 分 K（成交量由張轉股）聚合日 K後使用相同 Yahoo 因子。"
+                "Yahoo 空洞僅在兩側因子"
                 "穩定一致時插補，其他未匹配日期直接排除；絕不使用未還原價計算"
                 "長天期均線。"
             ),
@@ -1071,7 +1396,8 @@ def main(argv: list[str] | None = None) -> int:
             ),
             "cache": (
                 "每個 HTTP query response 分別寫入 data/analysis/cache/kbars__*.json；"
-                "預設重跑先讀快取，402 快取例外並採 1/2/4/8/16 秒指數退避。"
+                "預設重跑先讀快取；401/402/429 與伺服器暫時錯誤不重用，"
+                "並採 1/2/4/8 秒指數退避，共最多 5 次。"
             ),
         },
         "all_required_available": not unavailable,
