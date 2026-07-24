@@ -22,6 +22,8 @@
       --touched-soft: #E4F1EA;
       --watching: #817A70;
       --watching-soft: #EFEBE4;
+      --anomaly: #526D82;
+      --anomaly-soft: #EAF1F5;
       --shadow: 0 12px 32px rgba(55, 44, 25, 0.07);
       --radius-xl: 24px;
       --radius-lg: 18px;
@@ -118,7 +120,7 @@
     .status-strip {
       display: grid;
       grid-template-columns: minmax(250px, 1.25fr) minmax(190px, 0.9fr)
-        repeat(4, minmax(105px, 0.55fr));
+        repeat(5, minmax(100px, 0.52fr));
       min-width: 0;
       margin-bottom: 18px;
       overflow: hidden;
@@ -261,6 +263,10 @@
 
     .count-watching .count-value {
       color: var(--watching);
+    }
+
+    .count-anomaly .count-value {
+      color: var(--anomaly);
     }
 
     .health-strip {
@@ -421,6 +427,103 @@
       text-align: right;
     }
 
+    .anomaly-panel {
+      margin-bottom: 18px;
+      overflow: hidden;
+    }
+
+    .anomaly-heading {
+      min-width: 0;
+    }
+
+    .calibration-note {
+      margin: 3px 0 0;
+      color: #7A5A25;
+      font-size: 0.72rem;
+      overflow-wrap: anywhere;
+    }
+
+    .anomaly-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      min-width: 0;
+      gap: 10px;
+      padding: 12px 14px 14px;
+      background: linear-gradient(180deg, rgba(234, 241, 245, 0.42), transparent);
+    }
+
+    .anomaly-grid > .empty-state {
+      grid-column: 1 / -1;
+    }
+
+    .anomaly-card {
+      min-width: 0;
+      padding: 13px 14px;
+      border: 1px solid #CBD8E0;
+      border-radius: var(--radius-md);
+      background: rgba(255, 255, 255, 0.94);
+    }
+
+    .anomaly-card-head {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      min-width: 0;
+      gap: 10px;
+      margin-bottom: 9px;
+    }
+
+    .anomaly-stock {
+      min-width: 0;
+      overflow: hidden;
+      font-size: 0.85rem;
+      font-weight: 850;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .anomaly-score {
+      flex: 0 0 auto;
+      color: var(--anomaly);
+      font-family: Georgia, ui-serif, serif;
+      font-size: 0.78rem;
+      font-weight: 800;
+    }
+
+    .anomaly-detail-list {
+      display: grid;
+      gap: 6px;
+    }
+
+    .anomaly-detail {
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr);
+      align-items: baseline;
+      min-width: 0;
+      gap: 7px;
+    }
+
+    .anomaly-chip {
+      display: inline-flex;
+      align-items: center;
+      min-height: 22px;
+      padding: 2px 7px;
+      border: 1px solid #C4D3DC;
+      border-radius: 999px;
+      background: var(--anomaly-soft);
+      color: #3E5D73;
+      font-size: 0.66rem;
+      font-weight: 850;
+      white-space: nowrap;
+    }
+
+    .anomaly-numbers {
+      min-width: 0;
+      color: #5F6263;
+      font-size: 0.69rem;
+      overflow-wrap: anywhere;
+    }
+
     .stock-grid {
       display: grid;
       grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -527,6 +630,18 @@
       grid-template-columns: repeat(3, minmax(0, 1fr));
       min-width: 0;
       border-top: 1px solid var(--line);
+    }
+
+    .stock-anomalies {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 5px;
+      padding: 0 16px 12px 19px;
+    }
+
+    .stock-anomalies .anomaly-chip {
+      min-height: 21px;
+      font-size: 0.64rem;
     }
 
     .metric {
@@ -733,16 +848,19 @@
 
     @media (max-width: 1160px) {
       .status-strip {
-        grid-template-columns: repeat(4, minmax(0, 1fr));
+        grid-template-columns: repeat(5, minmax(0, 1fr));
       }
 
-      .status-primary,
-      .next-window {
+      .status-primary {
         grid-column: span 2;
       }
 
+      .next-window {
+        grid-column: span 3;
+      }
+
       .status-cell:nth-child(2),
-      .status-cell:nth-child(6) {
+      .status-cell:nth-child(7) {
         border-right: 0;
       }
 
@@ -752,6 +870,10 @@
 
       .stock-grid {
         grid-template-columns: minmax(0, 1fr);
+      }
+
+      .anomaly-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
       }
 
       .health-strip {
@@ -769,6 +891,10 @@
 
     @media (max-width: 860px) {
       .content-layout {
+        grid-template-columns: minmax(0, 1fr);
+      }
+
+      .anomaly-grid {
         grid-template-columns: minmax(0, 1fr);
       }
 
@@ -803,18 +929,27 @@
       .status-primary,
       .next-window {
         grid-column: span 2;
+        border-right: 0;
+      }
+
+      .count-anomaly {
+        grid-column: span 2;
+        border-right: 0;
       }
 
       .status-cell {
         padding: 13px 14px;
       }
 
-      .status-cell:nth-child(4) {
+      .status-cell:nth-child(4),
+      .status-cell:nth-child(6) {
         border-right: 0;
       }
 
       .status-cell:nth-child(3),
-      .status-cell:nth-child(4) {
+      .status-cell:nth-child(4),
+      .status-cell:nth-child(5),
+      .status-cell:nth-child(6) {
         border-bottom: 1px solid var(--line);
       }
 
@@ -930,6 +1065,10 @@
         <div class="cell-label">觀察中</div>
         <div class="cell-value count-value" id="count-watching">0</div>
       </div>
+      <div class="status-cell count-anomaly">
+        <div class="cell-label">其他異常</div>
+        <div class="cell-value count-value" id="count-anomaly">0</div>
+      </div>
     </section>
 
     <section class="health-strip" aria-label="資料流與錄製狀態">
@@ -954,6 +1093,24 @@
         <div class="health-value broker-health">
           <span class="health-badge" id="login-status">登入 —</span>
           <span class="health-badge" id="subscribe-status">訂閱 —</span>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel anomaly-panel" aria-labelledby="anomalies-title">
+      <header class="panel-header">
+        <div class="anomaly-heading">
+          <h2 class="panel-title" id="anomalies-title">其他異常標的（觀察用）</h2>
+          <p class="calibration-note" id="anomaly-threshold-note">
+            暫定門檻：峰值 ≥300 張且撤 ≥70%、振幅 ≥5%、跳空 ≥4%；門檻未經真實資料校準、可調。
+          </p>
+        </div>
+        <p class="panel-meta" id="anomaly-summary">0 檔</p>
+      </header>
+      <div class="anomaly-grid" id="anomaly-grid" aria-live="polite">
+        <div class="empty-state">
+          <span class="empty-icon" aria-hidden="true">◇</span>
+          尚未命中其他異常維度
         </div>
       </div>
     </section>
@@ -1007,6 +1164,11 @@
         watching: { icon: "◌", label: "觀察中", className: "watching" },
         none: { icon: "－", label: "尚無訊號", className: "none" }
       };
+      const ANOMALY = {
+        ANOM_BIG_BID_WITHDRAW: "大單驟撤",
+        ANOM_BID0_SWING: "試撮劇震",
+        ANOM_OPEN_GAP: "開盤大跳空"
+      };
       const SERVICE = {
         idle: "待命",
         armed: "已上線・等待窗口",
@@ -1028,6 +1190,7 @@
         countHeld: document.getElementById("count-held"),
         countTouched: document.getElementById("count-touched"),
         countWatching: document.getElementById("count-watching"),
+        countAnomaly: document.getElementById("count-anomaly"),
         recordingCell: document.getElementById("recording-cell"),
         recordingStatus: document.getElementById("recording-status"),
         recordingDot: document.getElementById("recording-dot"),
@@ -1036,6 +1199,9 @@
         lastEventAge: document.getElementById("last-event-age"),
         loginStatus: document.getElementById("login-status"),
         subscribeStatus: document.getElementById("subscribe-status"),
+        anomalySummary: document.getElementById("anomaly-summary"),
+        anomalyThresholdNote: document.getElementById("anomaly-threshold-note"),
+        anomalyGrid: document.getElementById("anomaly-grid"),
         stockSummary: document.getElementById("stock-summary"),
         connectionNote: document.getElementById("connection-note"),
         stockGrid: document.getElementById("stock-grid"),
@@ -1086,6 +1252,16 @@
       function formatVolume(value) {
         const number = finiteNumber(value);
         return number === null ? "—" : numberFormatter.format(number);
+      }
+
+      function formatPercent(value, signed = false) {
+        const number = finiteNumber(value);
+        if (number === null) return "—";
+        const sign = signed && number > 0 ? "+" : "";
+        return `${sign}${number.toLocaleString("zh-TW", {
+          minimumFractionDigits: 0,
+          maximumFractionDigits: 2
+        })}%`;
       }
 
       function parseTime(value) {
@@ -1148,6 +1324,104 @@
         return node;
       }
 
+      function anomalyDetails(stock, dimension) {
+        if (dimension === "ANOM_BIG_BID_WITHDRAW") {
+          return {
+            label: ANOMALY[dimension],
+            numbers:
+              `峰值 ${formatVolume(stock.bid0_peak_volume)} 張 → ` +
+              `殘量 ${formatVolume(stock.final_window_bid0_volume)} 張・` +
+              `撤 ${formatPercent(stock.bid0_withdraw_pct)}`
+          };
+        }
+        if (dimension === "ANOM_BID0_SWING") {
+          return {
+            label: ANOMALY[dimension],
+            numbers:
+              `bid0 ${formatPrice(stock.bid0_min_price)}–${formatPrice(stock.bid0_max_price)}・` +
+              `振幅 ${formatPercent(stock.bid0_swing_pct)}`
+          };
+        }
+        if (dimension === "ANOM_OPEN_GAP") {
+          const gap = finiteNumber(stock.reference_open_gap_pct);
+          const direction = stock.open_gap_direction === "up" || (gap !== null && gap > 0)
+            ? "向上"
+            : "向下";
+          return {
+            label: `開盤${direction}大跳空`,
+            numbers:
+              `前收 ${formatPrice(stock.reference)} → 開盤 ${formatPrice(stock.open_price)}・` +
+              `${formatPercent(stock.reference_open_gap_pct, true)}`
+          };
+        }
+        return {
+          label: safeText(ANOMALY[dimension], dimension),
+          numbers: "尚無明細"
+        };
+      }
+
+      function renderAnomalies(stocks, thresholds) {
+        const anomalous = stocks
+          .filter((stock) => Array.isArray(stock.anomalies) && stock.anomalies.length > 0)
+          .sort((left, right) => {
+            const scoreDiff = (finiteNumber(right.anomaly_score) ?? 0)
+              - (finiteNumber(left.anomaly_score) ?? 0);
+            return scoreDiff || safeText(left.code, "").localeCompare(safeText(right.code, ""));
+          });
+        const values = thresholds && typeof thresholds === "object" ? thresholds : {};
+        const peakLots = finiteNumber(values.bid_peak_lots) ?? 300;
+        const withdrawPct = finiteNumber(values.bid_withdraw_pct) ?? 70;
+        const swingPct = finiteNumber(values.swing_pct) ?? 5;
+        const gapPct = finiteNumber(values.gap_pct) ?? 4;
+
+        elements.anomalyThresholdNote.textContent =
+          `暫定門檻：峰值 ≥${formatVolume(peakLots)} 張且撤 ≥${formatPercent(withdrawPct)}、` +
+          `振幅 ≥${formatPercent(swingPct)}、跳空 ≥${formatPercent(gapPct)}；` +
+          "門檻未經真實資料校準、可調。";
+        elements.anomalySummary.textContent =
+          `${numberFormatter.format(anomalous.length)} 檔`;
+        elements.anomalyGrid.replaceChildren();
+
+        if (!anomalous.length) {
+          const empty = makeElement("div", "empty-state");
+          empty.append(
+            makeElement("span", "empty-icon", "◇"),
+            document.createTextNode("尚未命中其他異常維度")
+          );
+          elements.anomalyGrid.append(empty);
+          return;
+        }
+
+        anomalous.forEach((stock) => {
+          const card = makeElement("article", "anomaly-card");
+          const head = makeElement("div", "anomaly-card-head");
+          head.append(
+            makeElement(
+              "div",
+              "anomaly-stock",
+              `${safeText(stock.code)} ${safeText(stock.name, "")}`.trim()
+            ),
+            makeElement(
+              "div",
+              "anomaly-score",
+              `異常分數 ${formatVolume(stock.anomaly_score)}`
+            )
+          );
+          const details = makeElement("div", "anomaly-detail-list");
+          stock.anomalies.forEach((dimension) => {
+            const descriptor = anomalyDetails(stock, dimension);
+            const row = makeElement("div", "anomaly-detail");
+            row.append(
+              makeElement("span", "anomaly-chip", descriptor.label),
+              makeElement("span", "anomaly-numbers", descriptor.numbers)
+            );
+            details.append(row);
+          });
+          card.append(head, details);
+          elements.anomalyGrid.append(card);
+        });
+      }
+
       function renderStocks(stocks) {
         elements.stockGrid.replaceChildren();
         if (!stocks.length) {
@@ -1181,6 +1455,18 @@
           );
           head.append(stockId, badge);
 
+          const anomalies = Array.isArray(stock.anomalies) ? stock.anomalies : [];
+          const anomalyTags = makeElement("div", "stock-anomalies");
+          anomalies.forEach((dimension) => {
+            anomalyTags.append(
+              makeElement(
+                "span",
+                "anomaly-chip",
+                anomalyDetails(stock, dimension).label
+              )
+            );
+          });
+
           const body = makeElement("div", "stock-body");
           [
             ["即時 bid0 價", formatPrice(stock.bid0_price)],
@@ -1211,7 +1497,9 @@
             document.createTextNode(`撤單訊號 ${dropped}`)
           );
           sparkWrap.append(sparkBlock, lockMeta);
-          card.append(head, body, sparkWrap);
+          card.append(head);
+          if (anomalies.length) card.append(anomalyTags);
+          card.append(body, sparkWrap);
           elements.stockGrid.append(card);
           drawSparkline(canvas, Array.isArray(stock.spark) ? stock.spark : [], status.className);
         });
@@ -1437,6 +1725,7 @@
         setCount(elements.countHeld, counts.locked_held);
         setCount(elements.countTouched, counts.touched);
         setCount(elements.countWatching, counts.watching);
+        setCount(elements.countAnomaly, counts.anomaly);
         elements.stockSummary.textContent =
           `標的 ${numberFormatter.format(universe)} 檔・已訂閱 ${numberFormatter.format(subscribed)} 檔`;
         if (service === "error") {
@@ -1449,6 +1738,7 @@
           elements.connectionNote.textContent = "API 已連線・每秒更新";
           elements.connectionNote.className = "connection-note";
         }
+        renderAnomalies(stocks, state.anomaly_thresholds);
         renderStocks(stocks);
         renderAlerts(alerts);
         updateClock();

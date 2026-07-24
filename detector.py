@@ -34,6 +34,41 @@ DEFAULT_DROP_LOOKBACK_SECONDS = 30 * 60
 SNAPSHOT_LIMIT_TOLERANCE_RATIO = 0.001
 OPEN_GAP_TOLERANCE_PCT = 0.0001
 
+# 其他異常維度的暫定門檻。尚未經真實資料校準，集中於此以便調整。
+# 百分比常數採 API 顯示單位（5.0 代表 5%）。
+ANOM_BID_PEAK_LOTS = 300
+ANOM_BID_REMAIN_RATIO = 0.30
+ANOM_SWING_PCT = 5.0
+ANOM_GAP_PCT = 4.0
+
+ANOM_BIG_BID_WITHDRAW = "ANOM_BIG_BID_WITHDRAW"
+ANOM_BID0_SWING = "ANOM_BID0_SWING"
+ANOM_OPEN_GAP = "ANOM_OPEN_GAP"
+ANOMALY_DIMENSIONS = (
+    ANOM_BIG_BID_WITHDRAW,
+    ANOM_BID0_SWING,
+    ANOM_OPEN_GAP,
+)
+ANOMALY_LABELS = {
+    ANOM_BIG_BID_WITHDRAW: "大單驟撤",
+    ANOM_BID0_SWING: "試撮劇震",
+    ANOM_OPEN_GAP: "開盤大跳空",
+}
+# 目前三個維度等權；未來校準後可直接在此調整權重。
+ANOMALY_WEIGHTS = {
+    ANOM_BIG_BID_WITHDRAW: 1,
+    ANOM_BID0_SWING: 1,
+    ANOM_OPEN_GAP: 1,
+}
+ANOMALY_THRESHOLDS = {
+    "bid_peak_lots": ANOM_BID_PEAK_LOTS,
+    "bid_remain_ratio": ANOM_BID_REMAIN_RATIO,
+    "bid_withdraw_pct": (1.0 - ANOM_BID_REMAIN_RATIO) * 100.0,
+    "swing_pct": ANOM_SWING_PCT,
+    "gap_pct": ANOM_GAP_PCT,
+    "calibrated": False,
+}
+
 STATUS_LABELS = {
     "suspected_fake": "疑似假試撮",
     "locked_held": "鎖漲停守住",
@@ -134,8 +169,10 @@ class _StockState:
     code: str
     name: str
     limit_up: float | None
+    reference: float | None = None
     # 2=metadata 明列，1=event 明列，0=尚無明列值（可由 chg_type 推得）。
     limit_priority: int = 0
+    reference_priority: int = 0
     watching: bool = False
     seen_stream: bool = False
     locked: bool = False
@@ -146,6 +183,11 @@ class _StockState:
     latest_quote_at: datetime | None = None
     final_window_bid0_at: datetime | None = None
     final_window_bid0_volume: int = 0
+    anomaly_final_bid0_at: datetime | None = None
+    anomaly_final_bid0_volume: int | None = None
+    bid0_peak_volume: int = 0
+    bid0_min_price: float | None = None
+    bid0_max_price: float | None = None
     snapshot: dict[str, Any] | None = None
     snapshot_at: datetime | None = None
     snapshot_source_at: datetime | None = None
@@ -153,6 +195,12 @@ class _StockState:
     opening_tick_at: datetime | None = None
     open_price: float | None = None
     open_gap_pct: float | None = None
+    bid0_withdraw_pct: float | None = None
+    bid0_swing_pct: float | None = None
+    reference_open_gap_pct: float | None = None
+    open_gap_direction: str | None = None
+    anomalies: list[str] = field(default_factory=list)
+    anomaly_score: int = 0
     bid0_dropped: bool = False
     status: str = "none"
     locked_alerted: bool = False
@@ -315,9 +363,17 @@ class Detector:
         has_explicit_limit = (
             "limit_up" in metadata and metadata.get("limit_up") is not None
         )
+        has_explicit_reference = (
+            "reference" in metadata and metadata.get("reference") is not None
+        )
         limit_up = (
             _to_positive_float(metadata.get("limit_up"))
             if has_explicit_limit
+            else None
+        )
+        reference = (
+            _to_positive_float(metadata.get("reference"))
+            if has_explicit_reference
             else None
         )
         if state is None:
@@ -325,7 +381,9 @@ class Detector:
                 code=code,
                 name=raw_name or code,
                 limit_up=limit_up,
+                reference=reference,
                 limit_priority=2 if has_explicit_limit else 0,
+                reference_priority=2 if has_explicit_reference else 0,
                 watching=True,
                 spark=deque(maxlen=self.spark_points),
             )
@@ -338,6 +396,9 @@ class Detector:
                 # metadata 與 scanner.first_known 一樣優先於 event。
                 state.limit_up = limit_up
                 state.limit_priority = 2
+            if has_explicit_reference:
+                state.reference = reference
+                state.reference_priority = 2
         self._recompute(state)
 
     def _state_for_event(self, event: Mapping[str, Any]) -> _StockState:
@@ -350,6 +411,9 @@ class Detector:
             has_explicit_limit = (
                 "limit_up" in event and event.get("limit_up") is not None
             )
+            has_explicit_reference = (
+                "reference" in event and event.get("reference") is not None
+            )
             state = _StockState(
                 code=code,
                 name=name,
@@ -358,7 +422,13 @@ class Detector:
                     if has_explicit_limit
                     else None
                 ),
+                reference=(
+                    _to_positive_float(event.get("reference"))
+                    if has_explicit_reference
+                    else None
+                ),
                 limit_priority=1 if has_explicit_limit else 0,
+                reference_priority=1 if has_explicit_reference else 0,
                 spark=deque(maxlen=self.spark_points),
             )
             self._stocks[code] = state
@@ -372,6 +442,13 @@ class Detector:
         ):
             state.limit_up = _to_positive_float(event.get("limit_up"))
             state.limit_priority = 1
+        if (
+            state.reference_priority < 2
+            and "reference" in event
+            and event.get("reference") is not None
+        ):
+            state.reference = _to_positive_float(event.get("reference"))
+            state.reference_priority = 1
         if (
             state.limit_priority == 0
             and state.limit_up is None
@@ -446,6 +523,28 @@ class Detector:
             state.seen_stream = True
             if bid0 is not None:
                 state.sim_high = max(state.sim_high, bid0)
+            if bid0 is not None and bid0 > 0:
+                state.bid0_min_price = (
+                    bid0
+                    if state.bid0_min_price is None
+                    else min(state.bid0_min_price, bid0)
+                )
+                state.bid0_max_price = (
+                    bid0
+                    if state.bid0_max_price is None
+                    else max(state.bid0_max_price, bid0)
+                )
+            if bid0 is not None and bid0_volume is not None:
+                state.bid0_peak_volume = max(
+                    state.bid0_peak_volume,
+                    bid0_volume,
+                )
+                if (
+                    state.anomaly_final_bid0_at is None
+                    or event_at >= state.anomaly_final_bid0_at
+                ):
+                    state.anomaly_final_bid0_at = event_at
+                    state.anomaly_final_bid0_volume = bid0_volume
             if (
                 state.limit_up is not None
                 and _same_price(bid0, state.limit_up)
@@ -607,6 +706,90 @@ class Detector:
             )
         )
 
+    def _recompute_anomalies(self, state: _StockState) -> None:
+        """重算與既有試撮狀態並存的觀察型異常維度。"""
+
+        final_volume = state.anomaly_final_bid0_volume
+        if state.bid0_peak_volume > 0 and final_volume is not None:
+            remain_ratio = final_volume / state.bid0_peak_volume
+            state.bid0_withdraw_pct = round(
+                (1.0 - remain_ratio) * 100.0,
+                4,
+            )
+        else:
+            remain_ratio = None
+            state.bid0_withdraw_pct = None
+
+        if (
+            state.reference is not None
+            and state.reference > 0
+            and state.bid0_min_price is not None
+            and state.bid0_max_price is not None
+        ):
+            state.bid0_swing_pct = round(
+                (
+                    (state.bid0_max_price - state.bid0_min_price)
+                    / state.reference
+                )
+                * 100.0,
+                4,
+            )
+        else:
+            state.bid0_swing_pct = None
+
+        snapshot_open = (
+            _to_positive_float(state.snapshot.get("open_price"))
+            if self.session == "preopen" and state.snapshot is not None
+            else None
+        )
+        if (
+            snapshot_open is not None
+            and state.reference is not None
+            and state.reference > 0
+        ):
+            state.reference_open_gap_pct = round(
+                (snapshot_open / state.reference - 1.0) * 100.0,
+                4,
+            )
+            if state.reference_open_gap_pct > 0:
+                state.open_gap_direction = "up"
+            elif state.reference_open_gap_pct < 0:
+                state.open_gap_direction = "down"
+            else:
+                state.open_gap_direction = "flat"
+        else:
+            state.reference_open_gap_pct = None
+            state.open_gap_direction = None
+
+        anomalies: list[str] = []
+        if (
+            state.bid0_peak_volume >= ANOM_BID_PEAK_LOTS
+            and remain_ratio is not None
+            and remain_ratio < ANOM_BID_REMAIN_RATIO
+            and not math.isclose(
+                remain_ratio,
+                ANOM_BID_REMAIN_RATIO,
+                rel_tol=0.0,
+                abs_tol=1e-12,
+            )
+        ):
+            anomalies.append(ANOM_BIG_BID_WITHDRAW)
+        if (
+            state.bid0_swing_pct is not None
+            and state.bid0_swing_pct >= ANOM_SWING_PCT
+        ):
+            anomalies.append(ANOM_BID0_SWING)
+        if (
+            state.reference_open_gap_pct is not None
+            and abs(state.reference_open_gap_pct) >= ANOM_GAP_PCT
+        ):
+            anomalies.append(ANOM_OPEN_GAP)
+
+        state.anomalies = anomalies
+        state.anomaly_score = sum(
+            ANOMALY_WEIGHTS[dimension] for dimension in anomalies
+        )
+
     def _recompute(self, state: _StockState) -> None:
         snapshot = state.snapshot
         state.open_price = None
@@ -629,6 +812,7 @@ class Detector:
             else None
         )
         state.bid0_dropped = self._drop_evidence(state, snapshot)
+        self._recompute_anomalies(state)
 
         if state.limit_up is None or state.limit_up <= 0:
             status = "none"
@@ -708,6 +892,7 @@ class Detector:
         return {
             "code": state.code,
             "name": state.name,
+            "reference": state.reference,
             "limit_up": state.limit_up,
             "status": state.status,
             "status_label": STATUS_LABELS[state.status],
@@ -720,6 +905,16 @@ class Detector:
             "open_price": state.open_price,
             "open_gap_pct": state.open_gap_pct,
             "bid0_dropped": state.bid0_dropped,
+            "anomalies": list(state.anomalies),
+            "anomaly_score": state.anomaly_score,
+            "bid0_peak_volume": state.bid0_peak_volume,
+            "final_window_bid0_volume": state.anomaly_final_bid0_volume,
+            "bid0_withdraw_pct": state.bid0_withdraw_pct,
+            "bid0_min_price": state.bid0_min_price,
+            "bid0_max_price": state.bid0_max_price,
+            "bid0_swing_pct": state.bid0_swing_pct,
+            "reference_open_gap_pct": state.reference_open_gap_pct,
+            "open_gap_direction": state.open_gap_direction,
             "spark": [dict(point) for point in state.spark],
         }
 
@@ -728,6 +923,7 @@ class Detector:
         stocks.sort(
             key=lambda stock: (
                 STATUS_RANK[stock["status"]],
+                -stock["anomaly_score"],
                 stock["open_gap_pct"] is None,
                 stock["open_gap_pct"] or 0.0,
                 stock["code"],
@@ -742,10 +938,12 @@ class Detector:
                 "watching",
             )
         }
+        counts["anomaly"] = sum(bool(stock["anomalies"]) for stock in stocks)
         return {
             "counts": counts,
             "stocks": stocks,
             "alerts": [dict(alert) for alert in self._alerts],
+            "anomaly_thresholds": dict(ANOMALY_THRESHOLDS),
         }
 
     snapshot = get_state
@@ -804,6 +1002,16 @@ AuctionDetector = Detector
 
 
 __all__ = [
+    "ANOMALY_LABELS",
+    "ANOMALY_THRESHOLDS",
+    "ANOMALY_WEIGHTS",
+    "ANOM_BID0_SWING",
+    "ANOM_BID_PEAK_LOTS",
+    "ANOM_BID_REMAIN_RATIO",
+    "ANOM_BIG_BID_WITHDRAW",
+    "ANOM_GAP_PCT",
+    "ANOM_OPEN_GAP",
+    "ANOM_SWING_PCT",
     "AuctionDetector",
     "Detector",
     "OPEN_GAP_TOLERANCE_PCT",

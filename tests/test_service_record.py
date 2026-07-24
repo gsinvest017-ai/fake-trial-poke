@@ -367,6 +367,12 @@ class ServiceRecordTests(unittest.TestCase):
         self.assertTrue(api_state["login_ok"])
         self.assertTrue(api_state["subscribe_ok"])
         self.assertFalse(api_state["recording"])
+        self.assertIn("anomaly", api_state["counts"])
+        self.assertEqual(api_state["counts"]["anomaly"], 0)
+        self.assertFalse(api_state["anomaly_thresholds"]["calibrated"])
+        self.assertEqual(len(api_state["stocks"]), 1)
+        self.assertEqual(api_state["stocks"][0]["anomalies"], [])
+        self.assertEqual(api_state["stocks"][0]["anomaly_score"], 0)
 
 
 if __name__ == "__main__":

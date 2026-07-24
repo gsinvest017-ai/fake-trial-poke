@@ -11,7 +11,12 @@ sys.path.insert(
     str(pathlib.Path(__file__).resolve().parent.parent),
 )
 
-from detector import Detector
+from detector import (
+    ANOM_BID0_SWING,
+    ANOM_BIG_BID_WITHDRAW,
+    ANOM_OPEN_GAP,
+    Detector,
+)
 
 
 def bidask(
@@ -311,6 +316,125 @@ class DetectorTests(unittest.TestCase):
         self.assertEqual(full["universe"], 2)
         self.assertEqual(full["subscribed"], 1)
         self.assertEqual(full["counts"]["suspected_fake"], 1)
+
+    def test_all_anomaly_dimensions_coexist_with_existing_status(self) -> None:
+        detector = self.make_detector(
+            {
+                "code": "ANOM",
+                "name": "多維異常",
+                "reference": 100.0,
+                "limit_up": 110.0,
+            }
+        )
+        detector.process_event(
+            bidask("ANOM", "2026-07-24T08:40:00", 100.0, 300)
+        )
+        detector.process_event(
+            bidask("ANOM", "2026-07-24T08:50:00", 110.0, 400)
+        )
+        detector.process_event(
+            bidask("ANOM", "2026-07-24T08:59:59", 99.0, 80)
+        )
+        detector.process_event(
+            snapshot(
+                "ANOM",
+                "2026-07-24T09:00:03",
+                104.0,
+                99.0,
+                80,
+            )
+        )
+
+        result = stock(detector, "ANOM")
+        self.assertEqual(result["status"], "suspected_fake")
+        self.assertTrue(result["locked"])
+        self.assertEqual(
+            result["anomalies"],
+            [
+                ANOM_BIG_BID_WITHDRAW,
+                ANOM_BID0_SWING,
+                ANOM_OPEN_GAP,
+            ],
+        )
+        self.assertEqual(result["anomaly_score"], 3)
+        self.assertEqual(result["reference"], 100.0)
+        self.assertEqual(result["bid0_peak_volume"], 400)
+        self.assertEqual(result["final_window_bid0_volume"], 80)
+        self.assertEqual(result["bid0_withdraw_pct"], 80.0)
+        self.assertEqual(result["bid0_min_price"], 99.0)
+        self.assertEqual(result["bid0_max_price"], 110.0)
+        self.assertEqual(result["bid0_swing_pct"], 11.0)
+        self.assertEqual(result["reference_open_gap_pct"], 4.0)
+        self.assertEqual(result["open_gap_direction"], "up")
+        self.assertEqual(detector.get_state()["counts"]["anomaly"], 1)
+
+    def test_anomaly_boundaries_and_zero_bid_price_handling(self) -> None:
+        detector = self.make_detector(
+            {
+                "code": "EDGE",
+                "name": "門檻邊界",
+                "reference": 100.0,
+                "limit_up": 110.0,
+            }
+        )
+        detector.process_event(
+            bidask("EDGE", "2026-07-24T08:39:00", 0.0, 0)
+        )
+        detector.process_event(
+            bidask("EDGE", "2026-07-24T08:40:00", 100.0, 300)
+        )
+        detector.process_event(
+            bidask("EDGE", "2026-07-24T08:59:59", 105.0, 90)
+        )
+        detector.process_event(
+            snapshot(
+                "EDGE",
+                "2026-07-24T09:00:03",
+                96.0,
+                105.0,
+                90,
+            )
+        )
+
+        result = stock(detector, "EDGE")
+        # 殘量恰為 30% 不符合「<30%」；振幅與跳空恰等於門檻則命中。
+        self.assertNotIn(ANOM_BIG_BID_WITHDRAW, result["anomalies"])
+        self.assertEqual(
+            result["anomalies"],
+            [ANOM_BID0_SWING, ANOM_OPEN_GAP],
+        )
+        self.assertEqual(result["anomaly_score"], 2)
+        self.assertEqual(result["bid0_withdraw_pct"], 70.0)
+        self.assertEqual(result["bid0_min_price"], 100.0)
+        self.assertEqual(result["bid0_max_price"], 105.0)
+        self.assertEqual(result["bid0_swing_pct"], 5.0)
+        self.assertEqual(result["reference_open_gap_pct"], -4.0)
+        self.assertEqual(result["open_gap_direction"], "down")
+
+    def test_open_gap_anomaly_requires_snapshot_open(self) -> None:
+        detector = self.make_detector(
+            {
+                "code": "TICKOPEN",
+                "name": "只有開盤 tick",
+                "reference": 100.0,
+                "limit_up": 110.0,
+            }
+        )
+        detector.process_event(
+            {
+                "code": "TICKOPEN",
+                "ts": "2026-07-24T09:00:01",
+                "kind": "tick",
+                "simtrade": False,
+                "price": 104.0,
+            }
+        )
+
+        result = stock(detector, "TICKOPEN")
+        # 既有狀態仍可使用 opening tick，但新跳空維度只接受 snapshot open。
+        self.assertEqual(result["open_price"], 104.0)
+        self.assertIsNone(result["reference_open_gap_pct"])
+        self.assertNotIn(ANOM_OPEN_GAP, result["anomalies"])
 
 
 if __name__ == "__main__":

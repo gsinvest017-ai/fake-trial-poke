@@ -201,6 +201,7 @@ def empty_state(
             "locked_held": 0,
             "touched": 0,
             "watching": 0,
+            "anomaly": 0,
         },
         "stocks": [],
         "alerts": [],
@@ -732,6 +733,24 @@ def replay_worker(
         if isinstance(stock, dict)
         and str(stock.get("code")) in {"2880", "3081", "8039"}
     }
+    anomaly_evidence = {
+        str(stock.get("code")): {
+            "anomalies": stock.get("anomalies", []),
+            "anomaly_score": stock.get("anomaly_score", 0),
+            "bid0_peak_volume": stock.get("bid0_peak_volume"),
+            "final_window_bid0_volume": stock.get(
+                "final_window_bid0_volume"
+            ),
+            "bid0_withdraw_pct": stock.get("bid0_withdraw_pct"),
+            "bid0_swing_pct": stock.get("bid0_swing_pct"),
+            "reference_open_gap_pct": stock.get(
+                "reference_open_gap_pct"
+            ),
+        }
+        for stock in stocks
+        if isinstance(stock, dict)
+        and str(stock.get("code")) in {"6488", "2481", "6147"}
+    }
     print(
         "replay 完成："
         f"事件={processed}；stocks={len(stocks)}；"
@@ -742,6 +761,15 @@ def replay_worker(
     print(
         "replay 三檔="
         + json.dumps(statuses, ensure_ascii=False, separators=(",", ":")),
+        flush=True,
+    )
+    print(
+        "replay 異常三檔="
+        + json.dumps(
+            anomaly_evidence,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ),
         flush=True,
     )
 
