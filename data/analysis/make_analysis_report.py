@@ -14,7 +14,15 @@ from typing import Any, Iterable
 
 
 ORDER = ("8039", "2392", "2201")
-NAMES = {"8039": "台虹", "2392": "正崴", "2201": "裕隆"}
+MARGIN_ORDER = ("8039", "2392", "2201", "6488", "2481", "6147")
+NAMES = {
+    "8039": "台虹",
+    "2392": "正崴",
+    "2201": "裕隆",
+    "6488": "環球晶",
+    "2481": "強茂",
+    "6147": "頎邦",
+}
 MA_COLORS = {
     "ma5": "#d97706",
     "ma20": "#2563eb",
@@ -403,51 +411,130 @@ def postopen_fact(stock: dict[str, Any]) -> str:
     )
 
 
-def margin_svg(stock: dict[str, Any]) -> str:
+def margin_maint_svg(stock: dict[str, Any]) -> str:
     series = stock.get("series")
     if stock.get("availability") != "available" or not isinstance(series, list) or len(series) < 2:
-        return placeholder_svg("融資融券趨勢", stock.get("reason") or "未取得")
-    series = series[-60:]
-    balance = [finite(row.get("margin_balance_lots")) for row in series]
-    utilization = [finite(row.get("margin_utilization_pct")) for row in series]
-    short_ratio = [finite(row.get("short_margin_ratio_pct")) for row in series]
-    valid_balance = [v for v in balance if v is not None]
-    if not valid_balance:
-        return placeholder_svg("融資融券趨勢", "融資餘額未取得")
-    bal_low, bal_high = min(valid_balance), max(valid_balance)
-    if bal_high == bal_low:
-        bal_high += 1
-    util_values = [v for v in utilization + short_ratio if v is not None]
-    util_high = max(util_values + [1.0]) * 1.12
-    parts = [
-        '<svg class="chart" viewBox="0 0 960 400" role="img" aria-label="融資融券趨勢">',
-        '<rect width="960" height="400" fill="#ffffff"/>',
-        '<text x="66" y="20" class="svg-title">融資餘額與信用指標（60 交易日）</text>',
-    ]
+        return placeholder_svg("融資維持率趨勢", stock.get("reason") or "未取得")
+    series = series[-20:]
+    rates = [finite(row.get("maintenance_rate_pct")) for row in series]
+    valid_rates = [value for value in rates if value is not None]
+    if not valid_rates:
+        return placeholder_svg("融資維持率趨勢", "近 20 日維持率未取得")
+    chart_low = min(valid_rates + [130.0])
+    chart_high = max(valid_rates + [200.0])
+    padding = max(5.0, (chart_high - chart_low) * 0.12)
+    chart_low = max(0.0, chart_low - padding)
+    chart_high += padding
     x0, width = 66.0, 860.0
-    for y in (42, 110, 178, 246):
-        parts.append(f'<line x1="{x0}" x2="{x0 + width}" y1="{y}" y2="{y}" class="grid"/>')
-    balance_points = polyline(balance, x0, 42, width, 204, bal_low, bal_high)
+    y0, height = 44.0, 280.0
+
+    def y_for(value: float) -> float:
+        return y0 + height * (chart_high - value) / (chart_high - chart_low)
+
+    parts = [
+        '<svg class="chart" viewBox="0 0 960 380" role="img" aria-label="融資維持率近20日趨勢">',
+        '<rect width="960" height="380" fill="#ffffff"/>',
+        '<text x="66" y="22" class="svg-title">融資維持率（近 20 交易日）</text>',
+    ]
+    for value in (chart_low, 130.0, 150.0, 200.0, chart_high):
+        if value < chart_low or value > chart_high:
+            continue
+        y = y_for(value)
+        css_class = "call-line" if value == 130.0 else "grid"
+        parts.append(
+            f'<line x1="{x0}" x2="{x0 + width}" y1="{y:.1f}" y2="{y:.1f}" '
+            f'class="{css_class}"/>'
+            f'<text x="58" y="{y + 4:.1f}" text-anchor="end" class="svg-axis">'
+            f"{fmt_num(value, 0)}%</text>"
+        )
+    call_y = y_for(130.0)
     parts.append(
-        f'<polyline points="{balance_points}" fill="none" stroke="#b45309" stroke-width="2.5"/>'
-        f'<text x="58" y="48" text-anchor="end" class="svg-axis">{fmt_num(bal_high, 0)}</text>'
-        f'<text x="58" y="248" text-anchor="end" class="svg-axis">{fmt_num(bal_low, 0)}</text>'
-        '<text x="72" y="62" fill="#b45309" class="svg-axis">融資餘額（張）</text>'
+        f'<text x="{x0 + 7:.1f}" y="{call_y - 7:.1f}" class="svg-call-label">'
+        "130% 追繳線</text>"
     )
-    parts.append('<line x1="66" x2="926" y1="276" y2="276" class="grid"/>')
-    util_points = polyline(utilization, x0, 286, width, 72, 0, util_high)
-    ratio_points = polyline(short_ratio, x0, 286, width, 72, 0, util_high)
+    points = polyline(rates, x0, y0, width, height, chart_low, chart_high)
     parts.append(
-        f'<polyline points="{util_points}" fill="none" stroke="#2563eb" stroke-width="2"/>'
-        f'<polyline points="{ratio_points}" fill="none" stroke="#7c3aed" stroke-width="2"/>'
-        '<text x="72" y="301" fill="#2563eb" class="svg-axis">融資使用率</text>'
-        '<text x="158" y="301" fill="#7c3aed" class="svg-axis">券資比</text>'
+        f'<polyline points="{points}" fill="none" stroke="#0f766e" '
+        'stroke-width="3" stroke-linejoin="round" stroke-linecap="round"/>'
     )
+    latest = valid_rates[-1]
+    latest_index = max(
+        index for index, value in enumerate(rates) if value is not None
+    )
+    latest_x = x0 + width * latest_index / max(1, len(rates) - 1)
+    latest_y = y_for(latest)
     parts.append(
-        date_labels(series, (0, len(series) // 2, len(series) - 1), 386)
+        f'<circle cx="{latest_x:.1f}" cy="{latest_y:.1f}" r="4.5" fill="#0f766e"/>'
+        f'<text x="{latest_x - 7:.1f}" y="{latest_y - 10:.1f}" '
+        f'text-anchor="end" class="svg-title">{fmt_num(latest, 1)}%</text>'
     )
+    parts.append(date_labels(series, (0, len(series) // 2, len(series) - 1), 365))
     parts.append("</svg>")
     return "".join(parts)
+
+
+def risk_class(label: Any) -> str:
+    return {
+        "追繳": "risk-call",
+        "警戒": "risk-warning",
+        "正常": "risk-normal",
+        "安全": "risk-safe",
+    }.get(str(label), "risk-missing")
+
+
+def render_margin_maintenance_section(payload: dict[str, Any]) -> str:
+    cards: list[str] = []
+    rows: list[str] = []
+    for code in MARGIN_ORDER:
+        stock = stock_or_error(payload, code, "margin_maint")
+        current = stock.get("current", {})
+        trend = stock.get("trend_20d", {})
+        risk = current.get("risk_level", "未取得")
+        rows.append(
+            "<tr>"
+            f'<td class="nowrap"><strong>{code} {esc(stock.get("name", NAMES[code]))}</strong></td>'
+            f'<td>{fmt_num(current.get("maintenance_rate_pct"), 1)}%</td>'
+            f'<td><span class="risk-badge {risk_class(risk)}">{esc(risk)}</span></td>'
+            f'<td>{signed(current.get("buffer_to_call_pct_points"), 1, " 個百分點")}</td>'
+            f'<td>{esc(trend.get("direction", "未取得"))}／'
+            f'{signed(trend.get("change_pct_points"), 1, " 個百分點")}</td>'
+            f'<td>{esc(stock.get("as_of") or "未取得")}</td>'
+            "</tr>"
+        )
+        cards.append(
+            '<article class="margin-card">'
+            '<div class="margin-card-head">'
+            f'<h3>{code} {esc(stock.get("name", NAMES[code]))}</h3>'
+            f'<span class="risk-badge {risk_class(risk)}">{esc(risk)}</span>'
+            "</div>"
+            '<div class="metrics-grid compact">'
+            f'{metric("當前維持率", fmt_num(current.get("maintenance_rate_pct"), 1) + "%")}'
+            f'{metric("距 130% 緩衝", signed(current.get("buffer_to_call_pct_points"), 1, "pp"))}'
+            f'{metric("20 日趨勢", esc(trend.get("direction", "未取得")), signed(trend.get("change_pct_points"), 1, "pp"))}'
+            f'{metric("遞迴成本", fmt_price(current.get("financing_cost")), "60% 融資成數")}'
+            "</div>"
+            f'<figure>{margin_maint_svg(stock)}'
+            f'<figcaption>官方日檔，截止 {esc(stock.get("as_of") or "未取得")}；'
+            "紅色虛線為 130% 追繳線。</figcaption></figure>"
+            "</article>"
+        )
+    return (
+        '<section class="margin-maintenance" id="margin-maintenance">'
+        '<div class="section-kicker">MARGIN MAINTENANCE</div>'
+        "<h2>六檔融資維持率</h2>"
+        "<p>以當日收盤 ÷（CMoney 式遞迴融資成本 × 60%）計算；"
+        "130% 以下為追繳、130–150% 警戒、150–200% 正常、200% 以上安全。"
+        "上市股票使用 TWSE、上櫃股票使用 TPEx 的同日融資與收盤官方資料。</p>"
+        '<div class="summary-scroll"><table class="summary-table">'
+        "<thead><tr><th>股票</th><th>當前維持率</th><th>風險</th>"
+        "<th>距 130% 緩衝</th><th>近 20 日</th><th>資料日</th></tr></thead>"
+        f"<tbody>{''.join(rows)}</tbody></table></div>"
+        f'<div class="margin-grid">{"".join(cards)}</div>'
+        '<p class="method-note"><strong>成本起點：</strong>約 90 個完整交易日前以當日收盤基準化，'
+        "其後逐日使用買進、賣出、現金償還、官方前日餘額與今日餘額遞迴；"
+        "不跨越未確認資料缺口。餘額為 0 時成本歸零，前餘額為 0 時以當日收盤重建成本。</p>"
+        "</section>"
+    )
 
 
 def chips_svg(stock: dict[str, Any]) -> str:
@@ -693,14 +780,14 @@ def evidence_and_verdict(
     code: str,
     auction: dict[str, Any],
     kbar: dict[str, Any],
-    margin: dict[str, Any],
+    margin_maint: dict[str, Any],
     chips: dict[str, Any],
     market: dict[str, Any],
     liquidity: dict[str, Any],
 ) -> dict[str, Any]:
     ksum = kbar.get("summary", {})
-    mlatest = margin.get("latest", {})
-    m20 = finite(margin.get("changes", {}).get("margin_20d", {}).get("pct"))
+    margin_current = margin_maint.get("current", {})
+    margin_trend = margin_maint.get("trend_20d", {})
     total5 = finite(chips.get("summary", {}).get("total", {}).get("last_5d", {}).get("net_lots"))
     total20 = finite(chips.get("summary", {}).get("total", {}).get("last_20d", {}).get("net_lots"))
     foreign5 = finite(chips.get("summary", {}).get("foreign", {}).get("last_5d", {}).get("net_lots"))
@@ -725,17 +812,23 @@ def evidence_and_verdict(
         f"鎖漲停約 {fmt_num(auction.get('lock_duration_seconds'), 1)} 秒；鎖單高峰至末筆縮減 {fmt_num(withdrawal, 1)}%，撤減張數約為 20 日均量的 {fmt_num(withdrawal_vs_average_volume, 2)}%，判定為「{auction.get('withdrawal_assessment', '未取得')}」。",
         postopen_fact_text,
         f"20 日報酬 {signed(return20, 2, '%')}、量比 {fmt_num(volume_ratio, 3)}，技術狀態為「{ksum.get('trend', '未取得')}」。",
-        f"融資 20 日變化 {signed(m20, 2, '%')}；最新使用率 {fmt_num(mlatest.get('margin_utilization_pct'), 2)}%、券資比 {fmt_num(mlatest.get('short_margin_ratio_pct'), 2)}%。",
+        f"融資維持率 {fmt_num(margin_current.get('maintenance_rate_pct'), 2)}%，"
+        f"屬「{margin_current.get('risk_level', '未取得')}」；距 130% 追繳線 "
+        f"{signed(margin_current.get('buffer_to_call_pct_points'), 2, ' 個百分點')}，"
+        f"近 20 日{margin_trend.get('direction', '未取得')} "
+        f"{signed(margin_trend.get('change_pct_points'), 2, ' 個百分點')}。",
         f"三大法人 5 日合計 {signed(total5, 1)} 張、20 日合計 {signed(total20, 1)} 張；其中外資 5 日 {signed(foreign5, 1)} 張。",
         f"大盤為「{regime}」；TAIEX 20 日報酬 {signed(market.get('summary', {}).get('returns', {}).get('20d_pct'), 2, '%')}。",
     ]
 
     if code == "8039":
-        title = "高風險：高檔加速、融資堆高與短線法人轉賣同時出現"
+        title = "高風險：高檔加速與短線法人轉賣並存；融資維持率仍在安全帶"
         tone = "danger"
         conclusion = (
             "疑似假試撮的解釋力很強。股價在 20 日內急漲且位於 240 日區間頂端，"
-            "7/23 已明顯放量；同時融資 20 日大增、外資近 5 日轉為大幅賣超。"
+            "7/23 已明顯放量，外資近 5 日轉為大幅賣超。"
+            f"融資維持率為 {fmt_num(margin_current.get('maintenance_rate_pct'), 1)}%，"
+            "仍在安全帶，並不支持『融資戶已逼近追繳』；"
             "雖然投信、自營商與 20 日法人合計仍偏多，這是反例也是主要不確定性，"
             "但它更像中期買盤尚未完全退出、短線籌碼正在劇烈換手，不能用來合理化追價。"
         )
@@ -745,7 +838,7 @@ def evidence_and_verdict(
             "且外資賣超明顯收斂；否則把 5 日線與前一日低點視為風險界線。"
         )
         counter = (
-            "反例：20 日三大法人仍為淨買超、投信連買，券資比亦達兩位數，存在軋空急彈風險；"
+            "反例：20 日三大法人仍為淨買超、投信連買，且融資維持率位於安全帶；"
             f"且鎖單撤減僅約日均量 {fmt_num(withdrawal_vs_average_volume, 2)}%。"
             "因此本報告判為高風險籌碼換手，不直接斷言已完成出貨。"
         )
@@ -754,8 +847,9 @@ def evidence_and_verdict(
         tone = "warning"
         conclusion = (
             "試撮期價格失真與撤單跡象成立，但不像融資追高型出貨。試撮至開盤的 -10.33% "
-            "不是實際隔夜跌幅；實際開盤相對前收僅小幅下跌。融資 20 日小幅下降且使用率低，"
-            "排除「散戶槓桿極端堆積」的故事；真正的弱點是股價仍在多數均線下、"
+            "不是實際隔夜跌幅；實際開盤相對前收僅小幅下跌。"
+            f"融資維持率為 {fmt_num(margin_current.get('maintenance_rate_pct'), 1)}%，屬正常帶，"
+            "不支持『融資戶已逼近追繳』；真正的弱點是股價仍在多數均線下、"
             "20 日法人明顯賣超、最新量低於 20 日均量。近兩日法人轉為小買是反例，"
             "目前規模尚不足以扭轉 5/20 日累計供給。"
         )
@@ -764,17 +858,18 @@ def evidence_and_verdict(
             "且外資 5 日累計由負轉正；未出現前，反彈較像區間交易而非趨勢啟動。"
         )
         counter = (
-            "反例：法人已連續兩日小幅買超、融資沒有堆高；若後續放量站回中期均線，偏空判讀需撤回。"
+            "反例：法人已連續兩日小幅買超、融資維持率仍在正常帶；若後續放量站回中期均線，偏空判讀需撤回。"
             f"但本檔撤減張數約達 20 日均量 {fmt_num(withdrawal_vs_average_volume, 2)}%，是三檔中試撮委託量體最具經濟意義者。"
         )
     else:
-        title = "訊號分裂：試撮撤離很強，但法人買超與融資減少提供中期支撐"
+        title = "訊號分裂：試撮撤離很強，但法人買超且融資維持率仍正常"
         tone = "caution"
         conclusion = (
             "不能把這檔直接歸類為拉高出貨。鎖單自高峰縮減超過九成，但絕對量小，"
             "較像低深度委託造成的試撮價格失真；"
-            "但實際開盤高於前一日收盤，20 日外資與法人合計為明顯買超，融資則下降，"
-            "是較健康的法人進、散戶槓桿未追高組合。限制在於股價仍低於年線附近、"
+            "但實際開盤高於前一日收盤，20 日外資與法人合計為明顯買超，"
+            f"融資維持率 {fmt_num(margin_current.get('maintenance_rate_pct'), 1)}% 仍在正常帶。"
+            "限制在於股價仍低於年線附近、"
             "7/23 成交量明顯萎縮，買盤是否能轉成有效突破仍未確認。"
         )
         action = (
@@ -816,19 +911,21 @@ def render_stock(
     code: str,
     auction: dict[str, Any],
     kbar: dict[str, Any],
-    margin: dict[str, Any],
+    margin_maint: dict[str, Any],
     chips: dict[str, Any],
     market: dict[str, Any],
 ) -> tuple[str, dict[str, Any]]:
     name = auction.get("name") or NAMES[code]
     ksum = kbar.get("summary", {})
-    mlatest = margin.get("latest", {})
-    mchanges = margin.get("changes", {})
+    margin_current = margin_maint.get("current", {})
+    margin_trend = margin_maint.get("trend_20d", {})
     classification = chips.get("classification", {})
     industries = classification.get("industry_categories", [])
     industry_text = "、".join(industries) if industries else "未取得"
     liquidity = liquidity_assessment(kbar)
-    verdict = evidence_and_verdict(code, auction, kbar, margin, chips, market, liquidity)
+    verdict = evidence_and_verdict(
+        code, auction, kbar, margin_maint, chips, market, liquidity
+    )
     postopen = auction.get("postopen")
     if not isinstance(postopen, dict):
         raise ValueError(f"auction: missing postopen detail for {code}")
@@ -837,8 +934,6 @@ def render_stock(
     latest_close = finite(ksum.get("latest_adjusted_close"))
     disposition = chips.get("disposition", {})
     full_cash = chips.get("full_cash_settlement", {})
-    margin5 = mchanges.get("margin_5d", {})
-    margin20 = mchanges.get("margin_20d", {})
     sector_note = (
         f"FinMind 分類：{industry_text}。本次未另建全類股橫向量價樣本，"
         "因此「可交易」只按個股成交值、量能與波動評估，不把個股結果冒充類股強弱。"
@@ -866,9 +961,9 @@ def render_stock(
             ksum.get("volume_signal", "未取得"),
         ),
         metric(
-            "融資20日",
-            signed(margin20.get("pct"), 2, "%"),
-            f'{signed(margin20.get("lots"), 0)} 張',
+            "融資維持率",
+            f'{fmt_num(margin_current.get("maintenance_rate_pct"), 1)}%',
+            str(margin_current.get("risk_level", "未取得")),
         ),
         metric(
             "法人5日合計",
@@ -934,17 +1029,19 @@ def render_stock(
         "量比只回答「7/23 有沒有量」，不代表 7/24 盤中一定維持同等深度。</p>",
         "</div></div>",
         '<div class="analysis-block">',
-        '<div class="block-number">04</div><div><h3>融資融券</h3>',
+        '<div class="block-number">04</div><div><h3>融資維持率</h3>',
         '<div class="two-col"><div><table class="data-table"><tbody>',
-        f'<tr><th>融資餘額</th><td>{fmt_num(mlatest.get("margin_balance_lots"), 0)} 張</td></tr>',
-        f'<tr><th>融資 5 日</th><td class="{tone_class(margin5.get("pct"), inverse=True)}">{signed(margin5.get("lots"), 0)} 張（{signed(margin5.get("pct"), 2, "%")}）</td></tr>',
-        f'<tr><th>融資 20 日</th><td class="{tone_class(margin20.get("pct"), inverse=True)}">{signed(margin20.get("lots"), 0)} 張（{signed(margin20.get("pct"), 2, "%")}）</td></tr>',
-        f'<tr><th>融券餘額／券資比</th><td>{fmt_num(mlatest.get("short_balance_lots"), 0)} 張／{fmt_num(mlatest.get("short_margin_ratio_pct"), 3)}%</td></tr>',
-        f'<tr><th>融資使用率</th><td>{fmt_num(mlatest.get("margin_utilization_pct"), 3)}%</td></tr>',
+        f'<tr><th>當前維持率</th><td><strong>{fmt_num(margin_current.get("maintenance_rate_pct"), 2)}%</strong></td></tr>',
+        f'<tr><th>風險等級</th><td><span class="risk-badge {risk_class(margin_current.get("risk_level"))}">{esc(margin_current.get("risk_level", "未取得"))}</span></td></tr>',
+        f'<tr><th>距 130% 追繳線</th><td>{signed(margin_current.get("buffer_to_call_pct_points"), 2, " 個百分點")}</td></tr>',
+        f'<tr><th>收盤／遞迴成本</th><td>{fmt_price(margin_current.get("close"))}／{fmt_price(margin_current.get("financing_cost"))}</td></tr>',
+        f'<tr><th>融資餘額</th><td>{fmt_num(margin_current.get("balance_lots"), 0)} 張</td></tr>',
+        f'<tr><th>近 20 日</th><td>{esc(margin_trend.get("direction", "未取得"))}；{signed(margin_trend.get("change_pct_points"), 2, " 個百分點")}</td></tr>',
         '</tbody></table></div>',
-        '<div class="callout"><strong>口徑</strong><br>融資變化為期末餘額減 5／20 個交易期前餘額；'
-        "使用率＝融資餘額／FinMind 明確提供的融資限額，未把買賣增減誤當使用率。</div></div>",
-        f'<figure>{margin_svg(margin)}<figcaption>FinMind 融資融券，截止 {esc(margin.get("as_of", "未取得"))}。</figcaption></figure>',
+        '<div class="callout"><strong>口徑</strong><br>維持率＝收盤價 ÷（融資成本 × 60%）× 100。'
+        "融資成本以交易所每日買進、賣出、現金償還、前日與今日餘額逐日遞迴；"
+        "130% 以下追繳、130–150% 警戒、150–200% 正常、200% 以上安全。</div></div>",
+        f'<figure>{margin_maint_svg(margin_maint)}<figcaption>來源：TWSE／TPEx 官方融資與同日收盤，截止 {esc(margin_maint.get("as_of", "未取得"))}；融資成數假設 60%。</figcaption></figure>',
         "</div></div>",
         '<div class="analysis-block">',
         '<div class="block-number">05</div><div><h3>三大法人籌碼</h3>',
@@ -1004,7 +1101,8 @@ def css() -> str:
       border-radius:999px;color:#0f766e;background:#f0fdfa;font-size:13px}.nav{padding:14px 66px;
       border-bottom:1px solid var(--line);background:#fff;position:sticky;top:0;z-index:5}
     .nav a{display:inline-block;color:#334155;text-decoration:none;margin-right:24px;font-weight:700}
-    .overview,.methodology{padding:36px 66px}.overview{border-bottom:1px solid var(--line)}
+    .overview,.methodology,.margin-maintenance{padding:36px 66px}.overview,.margin-maintenance{
+      border-bottom:1px solid var(--line)}
     .market-panel{display:grid;grid-template-columns:320px 1fr;gap:26px;align-items:center;margin-top:18px}
     .market-card{background:#f8fafc;border:1px solid var(--line);border-radius:14px;padding:20px}
     .market-value{font-size:30px;font-weight:800;letter-spacing:-.02em}.market-label{color:var(--muted);font-size:13px}
@@ -1012,6 +1110,14 @@ def css() -> str:
     th{text-align:left;color:#475569;font-weight:700;background:#f8fafc}.summary-table th,.summary-table td,
       .data-table th,.data-table td{border-bottom:1px solid var(--line);padding:10px 11px;vertical-align:top}
     .summary-table tbody tr:hover{background:#f8fafc}.stock-section{padding:52px 66px 24px;border-top:8px solid var(--wash)}
+    .margin-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:16px;margin-top:26px}
+    .margin-card{border:1px solid var(--line);border-radius:12px;padding:18px;background:#fff}
+    .margin-card-head{display:flex;align-items:center;justify-content:space-between;gap:12px}
+    .margin-card-head h3{margin:0}.margin-card .metrics-grid.compact{grid-template-columns:repeat(2,1fr)}
+    .risk-badge{display:inline-block;border-radius:999px;padding:3px 9px;font-size:12px;font-weight:800}
+    .risk-call{background:#fee2e2;color:#991b1b}.risk-warning{background:#fef3c7;color:#92400e}
+    .risk-normal{background:#dbeafe;color:#1e40af}.risk-safe{background:#d1fae5;color:#065f46}
+    .risk-missing{background:#e2e8f0;color:#475569}
     .verdict{font-size:17px;font-weight:800;border-left:4px solid #64748b;padding:10px 14px;background:#f8fafc}
     .verdict.danger{border-color:#b91c1c;background:#fef2f2;color:#991b1b}.verdict.warning{
       border-color:#b45309;background:#fffbeb;color:#92400e}.verdict.caution{border-color:#1d4ed8;
@@ -1031,6 +1137,8 @@ def css() -> str:
       border-radius:10px;background:#fff}.svg-title{font:700 13px "Microsoft JhengHei",Arial;fill:#334155}
     .svg-axis{font:11px "Microsoft JhengHei",Arial;fill:#64748b}.svg-muted{font:13px "Microsoft JhengHei",Arial;
       fill:#94a3b8}.grid{stroke:#e8edf3;stroke-width:1}.zero{stroke:#94a3b8;stroke-width:1.2}
+    .call-line{stroke:#dc2626;stroke-width:1.6;stroke-dasharray:7 5}.svg-call-label{
+      font:700 11px "Microsoft JhengHei",Arial;fill:#b91c1c}
     figcaption,.method-note{font-size:12px;color:var(--muted)}.positive{color:var(--red);font-weight:700}
     .negative{color:var(--green);font-weight:700}.neutral{color:#64748b}.unavailable-grid{display:grid;
       grid-template-columns:1fr 1fr;gap:10px;margin-top:15px}.unavailable-grid>div{padding:12px 14px;
@@ -1040,12 +1148,13 @@ def css() -> str:
     .method-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:12px}.method-card{background:#fff;
       border:1px solid var(--line);border-radius:10px;padding:15px}.footer{padding:28px 66px;color:#64748b;
       font-size:12px;border-top:1px solid var(--line)}.nowrap{white-space:nowrap}
-    @media(max-width:800px){.hero,.overview,.methodology,.stock-section,.nav,.footer{padding-left:22px;
+    @media(max-width:800px){.hero,.overview,.methodology,.margin-maintenance,.stock-section,.nav,.footer{padding-left:22px;
       padding-right:22px}.market-panel,.two-col{grid-template-columns:1fr}.metrics-grid,
       .metrics-grid.compact{grid-template-columns:repeat(2,1fr)}.method-grid{grid-template-columns:1fr}
-      .summary-scroll{overflow-x:auto}.nav{position:static}.analysis-block{grid-template-columns:30px 1fr}}
+      .margin-grid{grid-template-columns:1fr}.summary-scroll{overflow-x:auto}.nav{position:static}
+      .analysis-block{grid-template-columns:30px 1fr}}
     @media print{body{background:#fff}.report{box-shadow:none}.nav{display:none}.stock-section{
-      break-before:page;border-top:0}.analysis-block,figure{break-inside:avoid}.hero{padding-top:30px}}
+      break-before:page;border-top:0}.analysis-block,figure,.margin-card{break-inside:avoid}.hero{padding-top:30px}}
     """
 
 
@@ -1053,7 +1162,7 @@ def main() -> None:
     args = parse_args()
     data_dir = args.analysis_dir
     kbars = read_json(data_dir / "kbars.json")
-    margin = read_json(data_dir / "margin.json")
+    margin_maint = read_json(data_dir / "margin_maint.json")
     chips = read_json(data_dir / "chips.json")
     auction = read_json(data_dir / "auction_detail.json")
     market = kbars.get("market", {})
@@ -1062,7 +1171,7 @@ def main() -> None:
 
     for code in ORDER:
         stock_or_error(kbars, code, "kbars")
-        stock_or_error(margin, code, "margin")
+        stock_or_error(margin_maint, code, "margin_maint")
         stock_or_error(chips, code, "chips")
         auction_stock = stock_or_error(auction, code, "auction")
         if not isinstance(auction_stock.get("postopen"), dict):
@@ -1075,7 +1184,7 @@ def main() -> None:
             code,
             stock_or_error(auction, code, "auction"),
             stock_or_error(kbars, code, "kbars"),
-            stock_or_error(margin, code, "margin"),
+            stock_or_error(margin_maint, code, "margin_maint"),
             stock_or_error(chips, code, "chips"),
             market,
         )
@@ -1087,7 +1196,7 @@ def main() -> None:
     for code in ORDER:
         a = stock_or_error(auction, code, "auction")
         k = stock_or_error(kbars, code, "kbars")
-        m = stock_or_error(margin, code, "margin")
+        m = stock_or_error(margin_maint, code, "margin_maint")
         c = stock_or_error(chips, code, "chips")
         ks = k.get("summary", {})
         summary_rows.append(
@@ -1097,10 +1206,13 @@ def main() -> None:
             f'<span class="negative">{signed(a.get("auction_to_open_gap_pct"), 2, "%")}</span></td>'
             f'<td>{esc(ks.get("trend", "未取得"))}<br>20日 {signed(ks.get("returns", {}).get("20d_pct"), 2, "%")}</td>'
             f'<td>{fmt_num(ks.get("volume_ratio_vs_20d"), 3)}×<br>{esc(ks.get("volume_signal", "未取得"))}</td>'
-            f'<td>{signed(m.get("changes", {}).get("margin_20d", {}).get("pct"), 2, "%")}</td>'
+            f'<td>{fmt_num(m.get("current", {}).get("maintenance_rate_pct"), 1)}%<br>'
+            f'<span class="risk-badge {risk_class(m.get("current", {}).get("risk_level"))}">'
+            f'{esc(m.get("current", {}).get("risk_level", "未取得"))}</span></td>'
             f'<td>{signed(c.get("summary", {}).get("total", {}).get("last_5d", {}).get("net_lots"), 1)} 張</td>'
             f'<td>{esc(verdicts[code]["title"])}</td></tr>'
         )
+    margin_maintenance_section = render_margin_maintenance_section(margin_maint)
 
     unavailable = [
         "FinMind TaiwanStockPriceAdj：會員資料未取得；已以 FinMind 原始 OHLCV × Yahoo 同日 adjclose/close 因子等價還原，未使用未還原價計算均線。",
@@ -1122,11 +1234,12 @@ def main() -> None:
   <header class="hero">
     <div class="eyebrow">PRE-OPEN AUCTION RESEARCH · 2026-07-24</div>
     <h1>疑似假試撮重點股票完整分析</h1>
-    <p class="subtitle">只分析盤前偵測出的 3 檔重點股：8039 台虹、2392 正崴、2201 裕隆。以原始試撮價量、09:03–09:05 開盤後買一、還原日 K、量能、融資融券、三大法人與大盤位置建立可稽核的證據鏈。</p>
+    <p class="subtitle">盤前偵測出的 3 檔重點股維持完整分析，並把 8039、2392、2201、6488、2481、6147 六檔的融資維度升級為 CMoney 式遞迴維持率。以原始試撮價量、09:03–09:05 開盤後買一、還原日 K、量能、官方融資維持率、三大法人與大盤位置建立可稽核的證據鏈。</p>
     <span class="asof">事件日 2026-07-24 · 開盤後觀測至 09:05 · 完整盤後資料截止 2026-07-23</span>
   </header>
   <nav class="nav" aria-label="報告導覽">
-    <a href="#overview">大盤與總覽</a><a href="#stock-8039">8039 台虹</a>
+    <a href="#overview">大盤與總覽</a><a href="#margin-maintenance">六檔融資維持率</a>
+    <a href="#stock-8039">8039 台虹</a>
     <a href="#stock-2392">2392 正崴</a><a href="#stock-2201">2201 裕隆</a>
     <a href="#method">方法與限制</a>
   </nav>
@@ -1145,24 +1258,25 @@ def main() -> None:
     </div>
     <p>大盤仍高於 MA60／MA120／MA240，但低於 MA20，長多與短線修正並存。這種環境不會自動否定個股強勢，卻會放大高檔異常試撮、槓桿堆積與籌碼轉賣的尾部風險。報告不計算缺資料的正式「市場風險分數」，只做可驗證的技術環境判讀。</p>
     <div class="summary-scroll"><table class="summary-table">
-      <thead><tr><th>股票</th><th>試撮→開盤</th><th>日K位置</th><th>量比</th><th>融資20日</th><th>法人5日</th><th>綜合研判</th></tr></thead>
+      <thead><tr><th>股票</th><th>試撮→開盤</th><th>日K位置</th><th>量比</th><th>融資維持率</th><th>法人5日</th><th>綜合研判</th></tr></thead>
       <tbody>{''.join(summary_rows)}</tbody>
     </table></div>
   </section>
+  {margin_maintenance_section}
   {''.join(sections)}
   <section class="methodology" id="method">
     <div class="section-kicker">METHOD & LIMITATIONS</div>
     <h2>方法、資料血統與未取得項目</h2>
     <div class="method-grid">
-      <div class="method-card"><strong>Point-in-time</strong><br>日 K、融資與法人只用至 2026-07-23 的完整盤後資料；2026-07-24 使用 recorder 已記錄的盤前試撮、實際開盤與 09:03–09:05 非試撮 bidask，未混入未完成日 K。</div>
+      <div class="method-card"><strong>Point-in-time</strong><br>日 K、融資維持率與法人只用至 2026-07-23 的完整盤後資料；2026-07-24 使用 recorder 已記錄的盤前試撮、實際開盤與 09:03–09:05 非試撮 bidask，未混入未完成日 K。</div>
       <div class="method-card"><strong>還原權值</strong><br>{esc(kbars.get("methodology", {}).get("stock_adjustment", "未取得"))}</div>
-      <div class="method-card"><strong>快取與重跑</strong><br>FinMind／Yahoo 每個 response 分檔快取於 data/analysis/cache；重跑優先讀快取。FinMind 402 採指數退避，不用空資料或猜測值補洞。</div>
+      <div class="method-card"><strong>融資維持率</strong><br>TWSE／TPEx 每市場每日兩個官方端點分檔快取於 data/analysis/cache；60% 融資成數，約 90 個交易日遞迴。休市須兩端同時確認，未確認缺口不跨洞計算。</div>
       <div class="method-card"><strong>撤單證據</strong><br>以鎖漲停期間買一量高峰至末筆縮減，且其後買一離開漲停價作行為判定；不是委託序號級稽核，也不等同法律結論。</div>
     </div>
     <h3 style="margin-top:24px">明確未取得</h3>
     <ul>{''.join(f'<li>{esc(item)}</li>' for item in unavailable)}</ul>
     <h3 style="margin-top:24px">來源檔</h3>
-    <p>本機 recorder：data/result_20260724.json、data/auction_20260724.jsonl、data/auction_20260724_postopen.jsonl。分析輸入：kbars.json、margin.json、chips.json、auction_detail.json。市場資料供應者名稱：FinMind、Yahoo Finance、臺灣證券交易所口徑。</p>
+    <p>本機 recorder：data/result_20260724.json、data/auction_20260724.jsonl、data/auction_20260724_postopen.jsonl。分析輸入：kbars.json、margin_maint.json、chips.json、auction_detail.json。市場資料供應者名稱：FinMind、Yahoo Finance、臺灣證券交易所、證券櫃檯買賣中心。</p>
     <p><strong>用途限制：</strong>這是研究與風險辨識報告，不是投資建議。7/24 當日後續成交、公告與盤後籌碼尚不在本報告資訊集內。</p>
   </section>
   <footer class="footer">離線自包含報告 · 無外部腳本、字型、樣式表或圖片連結 · 產生時間 {esc(generated)}</footer>
