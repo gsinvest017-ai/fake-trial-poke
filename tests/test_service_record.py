@@ -7,9 +7,11 @@ import pathlib
 import sys
 import tempfile
 import threading
+import types
 import unittest
 import urllib.request
 from datetime import timedelta
+from types import SimpleNamespace
 from unittest import mock
 
 sys.path.insert(
@@ -128,11 +130,29 @@ class ServiceRecordTests(unittest.TestCase):
             / "20260724"
         )
         expected_auction = expected_dir / "auction_20260724.jsonl"
+        expected_postopen = (
+            expected_dir / "auction_20260724_postopen.jsonl"
+        )
+        expected_result = expected_dir / "result_20260724.json"
 
         self.assertEqual(recorder.default_output_path(recording_at), expected_auction)
         self.assertEqual(
             service.default_live_record_path(recording_at),
             expected_auction,
+        )
+        self.assertEqual(
+            service.default_live_postopen_path(recording_at),
+            expected_postopen,
+        )
+        self.assertEqual(
+            service.default_live_result_path(recording_at),
+            expected_result,
+        )
+        self.assertEqual(
+            service.paired_postopen_path(
+                expected_dir / "validation.jsonl"
+            ),
+            expected_dir / "validation_postopen.jsonl",
         )
         self.assertEqual(
             scanner.default_input_path("2026-07-24"),
@@ -216,6 +236,12 @@ class ServiceRecordTests(unittest.TestCase):
 
             runtime.finish_recording(metadata)
             final_state = runtime.publish()
+            detector_result_path = temp_path / "detector_result.json"
+            service.write_detector_result(
+                detector_result_path,
+                final_state,
+                metadata,
+            )
 
             self.assertFalse(final_state["recording"])
             self.assertEqual(final_state["record_count"], len(events))
@@ -243,6 +269,21 @@ class ServiceRecordTests(unittest.TestCase):
             }
             self.assertEqual(stock_meta["9001"]["limit_up"], 100.0)
             self.assertEqual(recorded_meta["universe"], ["9001"])
+            detector_result = json.loads(
+                detector_result_path.read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                detector_result["detector"],
+                "AuctionDetector",
+            )
+            self.assertEqual(
+                detector_result["date"],
+                service.taipei_now().strftime("%Y-%m-%d"),
+            )
+            self.assertEqual(
+                detector_result["stocks"][0]["status"],
+                final_state["stocks"][0]["status"],
+            )
 
             self.assertEqual(
                 scanner.main(
@@ -321,6 +362,234 @@ class ServiceRecordTests(unittest.TestCase):
             )
             self.assertIsNone(default_args.record_out)
             self.assertIsNotNone(opt_in_args.record_out)
+
+    def test_postopen_writer_remains_visible_as_active_recording(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_path = (
+                pathlib.Path(temp_dir) / "auction_test_postopen.jsonl"
+            )
+            runtime, _metadata = self.make_runtime()
+            writer = service.ServiceJsonlWriter(output_path)
+            writer.start()
+            runtime.set_aux_recording(writer, output_path)
+            writer.put(synthetic_events(service.taipei_now())[0])
+
+            active_state = runtime.publish()
+            self.assertTrue(active_state["recording"])
+            self.assertEqual(
+                pathlib.Path(active_state["record_path"]),
+                output_path.resolve(),
+            )
+
+            writer.close()
+            runtime.finish_aux_recording(writer)
+            final_state = runtime.publish()
+            self.assertFalse(final_state["recording"])
+            self.assertEqual(final_state["record_count"], 1)
+            self.assertEqual(
+                pathlib.Path(final_state["record_path"]),
+                output_path.resolve(),
+            )
+
+    def test_short_live_window_writes_preopen_postopen_and_result(
+        self,
+    ) -> None:
+        class FakeQuote:
+            def __init__(self) -> None:
+                self.bidask_callback = None
+                self.preopen_event = None
+
+            def set_event_callback(self, _callback: object) -> None:
+                return None
+
+            def set_on_bidask_stk_v1_callback(
+                self,
+                callback: object,
+            ) -> None:
+                self.bidask_callback = callback
+
+            def subscribe(self, *_args: object, **_kwargs: object) -> None:
+                if self.bidask_callback is not None:
+                    self.bidask_callback(None, self.preopen_event)
+
+            def unsubscribe(
+                self,
+                *_args: object,
+                **_kwargs: object,
+            ) -> None:
+                return None
+
+        class FakeApi:
+            def __init__(self, quote: FakeQuote) -> None:
+                self.quote = quote
+                self.snapshot_calls = 0
+                self.postopen_event = None
+                self.snapshot = None
+
+            def login(self, **_kwargs: object) -> list[object]:
+                return []
+
+            def snapshots(
+                self,
+                _contracts: object,
+                **_kwargs: object,
+            ) -> list[object]:
+                self.snapshot_calls += 1
+                if (
+                    self.snapshot_calls == 1
+                    and self.quote.bidask_callback is not None
+                ):
+                    self.quote.bidask_callback(
+                        None,
+                        self.postopen_event,
+                    )
+                return [self.snapshot]
+
+            def logout(self) -> None:
+                return None
+
+        now = service.taipei_now()
+        start_at = now - timedelta(milliseconds=50)
+        end_at = now + timedelta(milliseconds=50)
+        contract = SimpleNamespace(
+            code="9001",
+            name="測試股",
+            reference=90.9,
+            limit_up=100.0,
+        )
+        empty_levels = [None] * 5
+        quote = FakeQuote()
+        quote.preopen_event = SimpleNamespace(
+            code="9001",
+            ts=(start_at + timedelta(milliseconds=10)).replace(
+                tzinfo=None
+            ),
+            simtrade=True,
+            bid_price=[100.0, *empty_levels[:4]],
+            bid_volume=[2500, *empty_levels[:4]],
+            ask_price=empty_levels,
+            ask_volume=empty_levels,
+        )
+        fake_api = FakeApi(quote)
+        fake_api.postopen_event = SimpleNamespace(
+            code="9001",
+            ts=(end_at + timedelta(milliseconds=50)).replace(
+                tzinfo=None
+            ),
+            simtrade=False,
+            bid_price=[99.5, *empty_levels[:4]],
+            bid_volume=[1000, *empty_levels[:4]],
+            ask_price=[100.0, *empty_levels[:4]],
+            ask_volume=[500, *empty_levels[:4]],
+        )
+        fake_api.snapshot = SimpleNamespace(
+            code="9001",
+            name="測試股",
+            ts=end_at.replace(tzinfo=None),
+            open_price=100.0,
+            bid_price=[100.0, *empty_levels[:4]],
+            bid_volume=[1800, *empty_levels[:4]],
+            ask_price=empty_levels,
+            ask_volume=empty_levels,
+        )
+        fake_shioaji = types.ModuleType("shioaji")
+        fake_shioaji.Shioaji = lambda: fake_api
+        fake_constant = types.ModuleType("shioaji.constant")
+        fake_constant.QuoteType = SimpleNamespace(BidAsk="bidask")
+        fake_constant.QuoteVersion = SimpleNamespace(v1="v1")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = pathlib.Path(temp_dir)
+            record_path = temp_path / "auction_20260727.jsonl"
+            result_path = temp_path / "result_20260727.json"
+            runtime = service.ServiceRuntime(
+                session="preopen",
+                window_start=service.iso_taipei(start_at),
+                window_end=service.iso_taipei(end_at),
+                service_status="armed",
+            )
+
+            with (
+                mock.patch.dict(
+                    sys.modules,
+                    {
+                        "shioaji": fake_shioaji,
+                        "shioaji.constant": fake_constant,
+                    },
+                ),
+                mock.patch.object(
+                    service,
+                    "_configure_quiet_solace",
+                    return_value=None,
+                ),
+                mock.patch.object(
+                    service,
+                    "load_live_credentials",
+                    return_value=("test-key", "test-secret"),
+                ),
+                mock.patch.object(
+                    recorder,
+                    "wait_for_contracts",
+                    return_value=None,
+                ),
+                mock.patch.object(
+                    recorder,
+                    "requested_universe",
+                    return_value=([(contract.code, contract)], [], 1),
+                ),
+                mock.patch.object(service, "POSTOPEN_MINUTES", 0.003),
+                mock.patch.object(
+                    service,
+                    "SNAPSHOT_AFTER_END_SECONDS",
+                    0.01,
+                ),
+            ):
+                completed = service.run_one_live_window(
+                    runtime,
+                    session="preopen",
+                    start_at=start_at,
+                    end_at=end_at,
+                    universe_spec=None,
+                    stop_event=threading.Event(),
+                    record_enabled=True,
+                    record_out=record_path,
+                    result_out=result_path,
+                )
+
+            postopen_path = service.paired_postopen_path(record_path)
+            self.assertTrue(completed)
+            for artifact in (
+                record_path,
+                record_path.with_suffix(".meta.json"),
+                postopen_path,
+                postopen_path.with_suffix(".meta.json"),
+                result_path,
+            ):
+                self.assertTrue(artifact.is_file(), artifact)
+            main_rows = [
+                json.loads(line)
+                for line in record_path.read_text(
+                    encoding="utf-8"
+                ).splitlines()
+            ]
+            postopen_rows = [
+                json.loads(line)
+                for line in postopen_path.read_text(
+                    encoding="utf-8"
+                ).splitlines()
+            ]
+            self.assertEqual(
+                [row["kind"] for row in main_rows],
+                ["bidask", "snapshot"],
+            )
+            self.assertEqual(
+                [row["kind"] for row in postopen_rows],
+                ["bidask", "snapshot"],
+            )
+            result = json.loads(result_path.read_text(encoding="utf-8"))
+            self.assertEqual(result["detector"], "AuctionDetector")
+            self.assertEqual(result["subscribed"], 1)
+            self.assertFalse(runtime.publish()["recording"])
 
     def test_login_or_subscription_failure_reports_error(self) -> None:
         for login_ok, subscribe_ok in ((False, False), (True, False)):

@@ -41,6 +41,7 @@ DEFAULT_HOST = "127.0.0.1"
 MAX_SUBSCRIBED_STOCKS = 254
 PREARM_MINUTES = 5
 SNAPSHOT_AFTER_END_SECONDS = 5
+POSTOPEN_MINUTES = 5
 PUBLISH_INTERVAL_SECONDS = 0.2
 SUBSCRIBE_EVENT_GRACE_SECONDS = 0.01
 LOGIN_RETRY_SECONDS = 30.0
@@ -112,6 +113,25 @@ def default_live_record_path(recording_at: datetime) -> Path:
     """回傳 live 正式錄製按交易日分區的預設 JSONL 路徑。"""
     date_key = recording_at.strftime("%Y%m%d")
     return HISTORY_DIR / date_key / f"auction_{date_key}.jsonl"
+
+
+def default_live_postopen_path(recording_at: datetime) -> Path:
+    """回傳 live 開盤後續錄按交易日分區的預設 JSONL 路徑。"""
+    date_key = recording_at.strftime("%Y%m%d")
+    return HISTORY_DIR / date_key / f"auction_{date_key}_postopen.jsonl"
+
+
+def default_live_result_path(recording_at: datetime) -> Path:
+    """回傳既有 detector 每日收口判定的預設 JSON 路徑。"""
+    date_key = recording_at.strftime("%Y%m%d")
+    return HISTORY_DIR / date_key / f"result_{date_key}.json"
+
+
+def paired_postopen_path(record_path: Path) -> Path:
+    """明確覆寫主錄製路徑時，將續錄放在同目錄的配對檔。"""
+    return record_path.with_name(
+        f"{record_path.stem}_postopen{record_path.suffix}"
+    )
 
 
 def safe_int(value: Any, default: int = 0) -> int:
@@ -316,6 +336,51 @@ def write_record_metadata(
     return meta_path
 
 
+def write_detector_result(
+    result_path: Path,
+    state: dict[str, Any],
+    metadata: dict[str, Any],
+) -> Path:
+    """將既有 AuctionDetector 的收口狀態原子寫入每日 result。"""
+    raw_date = str(metadata.get("date") or "").strip()
+    date_text = (
+        f"{raw_date[:4]}-{raw_date[4:6]}-{raw_date[6:8]}"
+        if len(raw_date) == 8 and raw_date.isdigit()
+        else raw_date
+    )
+    result = {
+        "date": date_text,
+        "session": state.get("session"),
+        "window": copy.deepcopy(state.get("window", {})),
+        "universe_size": safe_int(
+            metadata.get("universe_size"),
+            safe_int(state.get("universe")),
+        ),
+        "subscribed": safe_int(state.get("subscribed")),
+        "sub_limit": safe_int(metadata.get("sub_limit")),
+        "generated_at": iso_taipei(),
+        "detector": "AuctionDetector",
+        "counts": copy.deepcopy(state.get("counts", {})),
+        "stocks": copy.deepcopy(state.get("stocks", [])),
+        "alerts": copy.deepcopy(state.get("alerts", [])),
+        "anomaly_thresholds": copy.deepcopy(
+            state.get("anomaly_thresholds", {})
+        ),
+    }
+    resolved_path = relative_path(result_path)
+    resolved_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path = resolved_path.with_suffix(
+        resolved_path.suffix + ".tmp"
+    )
+    with temporary_path.open("w", encoding="utf-8", newline="\n") as handle:
+        json.dump(result, handle, ensure_ascii=False, indent=2)
+        handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    temporary_path.replace(resolved_path)
+    return resolved_path
+
+
 class SharedState:
     """提供 webserver 無鎖外洩風險的 thread-safe JSON snapshot。"""
 
@@ -372,6 +437,8 @@ class ServiceRuntime:
         self._record_writer: ServiceJsonlWriter | None = None
         self._record_path: Path | None = None
         self._record_count = 0
+        self._aux_record_writer: ServiceJsonlWriter | None = None
+        self._aux_record_path: Path | None = None
         self._record_error: BaseException | None = None
         self.shared = SharedState(
             empty_state(
@@ -489,12 +556,30 @@ class ServiceRuntime:
             write_record_metadata(writer.path, final_metadata)
         return writer.count
 
-    def process_event(
+    def set_aux_recording(
         self,
-        event: dict[str, Any],
-        *,
-        market_event: bool = True,
+        writer: ServiceJsonlWriter,
+        path: Path,
     ) -> None:
+        """登記同一 live session 的開盤後 writer，供 UI 誠實顯示。"""
+        with self._lock:
+            if self._aux_record_writer is not None:
+                raise RuntimeError("已有開盤後 JSONL 錄製")
+            self._aux_record_writer = writer
+            self._aux_record_path = relative_path(path)
+
+    def finish_aux_recording(self, writer: ServiceJsonlWriter) -> None:
+        with self._lock:
+            if self._aux_record_writer is not writer:
+                return
+            self._aux_record_writer = None
+            self._record_path = self._aux_record_path
+            self._record_count = writer.count
+            if writer.error is not None:
+                self._record_error = writer.error
+
+    def record_event(self, event: dict[str, Any]) -> None:
+        """只落地事件，不送進 detector；供開盤後續錄使用。"""
         with self._lock:
             writer = self._record_writer
             if writer is not None:
@@ -502,6 +587,22 @@ class ServiceRuntime:
                     writer.put(event)
                 except Exception as exc:
                     self._record_error = exc
+
+    def process_event(
+        self,
+        event: dict[str, Any],
+        *,
+        market_event: bool = True,
+        record_event: bool = True,
+    ) -> None:
+        with self._lock:
+            if record_event:
+                writer = self._record_writer
+                if writer is not None:
+                    try:
+                        writer.put(event)
+                    except Exception as exc:
+                        self._record_error = exc
             self._detector.process_event(event)
             if market_event:
                 self._last_event_ts = parse_iso(event.get("ts")) or taipei_now()
@@ -510,7 +611,7 @@ class ServiceRuntime:
         with self._lock:
             now_value = self._now_override or iso_taipei()
             wall_now = taipei_now()
-            active_writer = self._record_writer
+            active_writer = self._record_writer or self._aux_record_writer
             if active_writer is not None and active_writer.error is not None:
                 self._record_error = active_writer.error
             last_event_age_sec = (
@@ -554,13 +655,20 @@ class ServiceRuntime:
             # detector 維持既有 enum；HTTP 契約由 service 額外揭露
             # error/degraded，不迫使判定模組認識傳輸層健康狀態。
             state["service_status"] = service_status
-            writer = self._record_writer
+            writer = self._record_writer or self._aux_record_writer
+            active_record_path = (
+                self._record_path
+                if self._record_writer is not None
+                else self._aux_record_path
+                if self._aux_record_writer is not None
+                else self._record_path
+            )
             state.update(
                 {
                     "recording": bool(writer is not None and writer.active),
                     "record_path": (
-                        str(self._record_path)
-                        if self._record_path is not None
+                        str(active_record_path)
+                        if active_record_path is not None
                         else None
                     ),
                     "record_count": (
@@ -702,6 +810,7 @@ def replay_worker(
     speed: float,
     stop_event: threading.Event,
     record_metadata: dict[str, Any] | None = None,
+    result_path: Path | None = None,
 ) -> None:
     replay_started_at = rows[0][0] if rows else None
     wall_started_at = time.monotonic()
@@ -733,6 +842,12 @@ def replay_worker(
             runtime.finish_recording(record_metadata)
 
     state = runtime.publish()
+    if result_path is not None:
+        write_detector_result(
+            result_path,
+            state,
+            record_metadata or {},
+        )
     counts = state.get("counts", {})
     stocks = state.get("stocks", [])
     statuses = {
@@ -870,8 +985,9 @@ def run_one_live_window(
     stop_event: threading.Event,
     record_enabled: bool,
     record_out: Path | None,
+    result_out: Path | None = None,
 ) -> bool:
-    """連線並處理單一窗口；成功完成 snapshot 回傳 True。"""
+    """連線並處理盤前、開盤 snapshot 與五分鐘開盤後續錄。"""
     import recorder
 
     _configure_quiet_solace()
@@ -883,10 +999,18 @@ def run_one_live_window(
     active_subscriptions: list[tuple[Any, Any]] = []
     candidate_codes: set[str] = set()
     subscription_limit = threading.Event()
-    detector_ready = threading.Event()
+    callbacks_ready = threading.Event()
     universe: list[tuple[str, Any]] = []
+    names: dict[str, str] = {}
     recording_metadata: dict[str, Any] | None = None
+    postopen_metadata: dict[str, Any] | None = None
+    postopen_writer: ServiceJsonlWriter | None = None
+    postopen_path: Path | None = None
     snapshot_count = 0
+    postopen_snapshot_count = 0
+    postopen_end_at = end_at + timedelta(
+        minutes=POSTOPEN_MINUTES if session == "preopen" else 0
+    )
 
     def on_event(
         resp_code: Any,
@@ -902,7 +1026,7 @@ def run_one_live_window(
     def on_bidask(exchange: Any, bidask: Any) -> None:
         del exchange
         try:
-            if not detector_ready.is_set():
+            if not callbacks_ready.is_set():
                 return
             code = recorder.normalize_code(getattr(bidask, "code", ""))
             if code not in candidate_codes:
@@ -916,11 +1040,15 @@ def run_one_live_window(
             if event_at is None:
                 return
             aware_event_at = event_at.replace(tzinfo=TAIPEI)
-            # locked 證據只允許窗口內事件，且不把窗口後 callback 倒灌。
-            if not start_at <= aware_event_at < end_at:
-                return
             record = recorder.bidask_record(bidask, code)
-            runtime.process_event(record)
+            # detector 只吃盤前窗口；09:00–09:05 另檔保存，不倒灌判定。
+            if start_at <= aware_event_at < end_at:
+                runtime.process_event(record)
+            elif (
+                end_at <= aware_event_at <= postopen_end_at
+                and postopen_writer is not None
+            ):
+                postopen_writer.put(record)
         except Exception as exc:  # pragma: no cover - 真實 callback 防禦
             print(
                 f"BidAsk callback FAILED（{recorder.safe_error(exc)}）",
@@ -977,11 +1105,34 @@ def run_one_live_window(
             output_path = record_out or default_live_record_path(start_at)
             try:
                 runtime.start_recording(output_path, append=True)
+                recording_metadata = metadata
+                if session == "preopen":
+                    postopen_path = (
+                        paired_postopen_path(record_out)
+                        if record_out is not None
+                        else default_live_postopen_path(start_at)
+                    )
+                    postopen_writer = ServiceJsonlWriter(
+                        postopen_path,
+                        append=True,
+                    )
+                    postopen_writer.start()
+                    runtime.set_aux_recording(
+                        postopen_writer,
+                        postopen_path,
+                    )
             except OSError as exc:
                 raise LiveSourceError(
                     f"recording FAILED（{recorder.safe_error(exc)}）"
                 ) from exc
-            recording_metadata = metadata
+            if postopen_writer is not None:
+                postopen_metadata = live_metadata(
+                    session=session,
+                    start_at=end_at,
+                    end_at=postopen_end_at,
+                    universe=universe,
+                    subscribed_codes=candidate_codes,
+                )
         runtime.reset_detector(
             metadata,
             session=session,
@@ -998,7 +1149,7 @@ def run_one_live_window(
             now_override=None,
         )
         runtime.publish()
-        detector_ready.set()
+        callbacks_ready.set()
 
         api.quote.set_event_callback(on_event)
         api.quote.set_on_bidask_stk_v1_callback(on_bidask)
@@ -1065,11 +1216,19 @@ def run_one_live_window(
             )
         if recording_metadata is not None:
             recording_metadata = metadata
+        if postopen_metadata is not None:
+            postopen_metadata = live_metadata(
+                session=session,
+                start_at=end_at,
+                end_at=postopen_end_at,
+                universe=universe,
+                subscribed_codes=successful_codes,
+            )
         runtime.set_context(
             subscribed=len(successful_codes),
             subscribe_ok=(
-                len(successful_codes) == len(universe)
-                and len(universe) > 0
+                len(successful_codes) == len(candidates)
+                and len(candidates) > 0
             ),
         )
         print(
@@ -1097,7 +1256,6 @@ def run_one_live_window(
             ):
                 return False
 
-        detector_ready.clear()
         snapshot_at = end_at + timedelta(
             seconds=SNAPSHOT_AFTER_END_SECONDS
         )
@@ -1127,9 +1285,11 @@ def run_one_live_window(
                     names,
                     observed_at,
                 )
-                if record.get("code") not in candidate_codes:
+                if not record.get("code"):
                     continue
-                runtime.process_event(record)
+                runtime.record_event(record)
+                if record.get("code") in candidate_codes:
+                    runtime.process_event(record, record_event=False)
                 snapshot_count += 1
         except Exception as exc:
             print(
@@ -1146,8 +1306,35 @@ def run_one_live_window(
             next_window_at=iso_taipei(next_start),
         )
         state = runtime.publish()
+        if recording_metadata is not None:
+            final_metadata = dict(recording_metadata)
+            final_metadata.update(
+                {
+                    "snapshot_count": snapshot_count,
+                    "snapshot_requested": len(universe),
+                    "snapshot_complete": snapshot_count == len(universe),
+                }
+            )
+            try:
+                runtime.finish_recording(final_metadata)
+                recording_metadata = None
+                result_path = (
+                    result_out
+                    if result_out is not None
+                    else default_live_result_path(start_at)
+                )
+                written_result = write_detector_result(
+                    result_path,
+                    state,
+                    final_metadata,
+                )
+            except Exception as exc:
+                raise LiveSourceError(
+                    "盤前 meta/result 落地 FAILED"
+                ) from exc
+            print(f"detector result={written_result}", flush=True)
         print(
-            f"窗口收口：snapshot={snapshot_count}/{len(candidate_codes)}；"
+            f"窗口收口：snapshot={snapshot_count}/{len(universe)}；"
             "counts="
             + json.dumps(
                 state.get("counts", {}),
@@ -1156,17 +1343,96 @@ def run_one_live_window(
             ),
             flush=True,
         )
+
+        if postopen_writer is not None:
+            postopen_snapshot_at = postopen_end_at + timedelta(
+                seconds=SNAPSHOT_AFTER_END_SECONDS
+            )
+            if stop_wait(
+                stop_event,
+                max(
+                    0.0,
+                    (postopen_snapshot_at - taipei_now()).total_seconds(),
+                ),
+            ):
+                return False
+            callbacks_ready.clear()
+            postopen_observed_at = taipei_now().replace(tzinfo=None)
+            try:
+                with recorder.quiet_library_call():
+                    raw_postopen_snapshots = api.snapshots(
+                        [contract for _code, contract in universe],
+                        timeout=30_000,
+                    )
+                for index, snapshot in enumerate(
+                    recorder.as_list(raw_postopen_snapshots)
+                ):
+                    fallback_code = (
+                        universe[index][0] if index < len(universe) else ""
+                    )
+                    record = recorder.snapshot_record(
+                        snapshot,
+                        fallback_code,
+                        names,
+                        postopen_observed_at,
+                    )
+                    if not record.get("code"):
+                        continue
+                    postopen_writer.put(record)
+                    postopen_snapshot_count += 1
+            except Exception as exc:
+                print(
+                    "postopen snapshot FAILED"
+                    f"（{recorder.safe_error(exc)}）",
+                    flush=True,
+                )
+
+            postopen_writer.close()
+            runtime.finish_aux_recording(postopen_writer)
+            if postopen_metadata is not None and postopen_path is not None:
+                final_postopen_metadata = dict(postopen_metadata)
+                final_postopen_metadata.update(
+                    {
+                        "snapshot_count": postopen_snapshot_count,
+                        "snapshot_requested": len(universe),
+                        "snapshot_complete": (
+                            postopen_snapshot_count == len(universe)
+                        ),
+                        "generated_at": iso_taipei(),
+                        "record_count": postopen_writer.count,
+                    }
+                )
+                try:
+                    write_record_metadata(
+                        postopen_path,
+                        final_postopen_metadata,
+                    )
+                except Exception as exc:
+                    raise LiveSourceError(
+                        "postopen meta 落地 FAILED"
+                    ) from exc
+            if postopen_writer.error is not None:
+                raise LiveSourceError("postopen recording FAILED")
+            print(
+                "開盤後續錄收口："
+                f"path={postopen_path}；"
+                f"records={postopen_writer.count}；"
+                f"snapshot={postopen_snapshot_count}/{len(universe)}",
+                flush=True,
+            )
+            postopen_writer = None
+            postopen_metadata = None
         return True
     finally:
-        detector_ready.clear()
+        callbacks_ready.clear()
         if recording_metadata is not None:
             final_metadata = dict(recording_metadata)
             final_metadata.update(
                 {
                     "snapshot_count": snapshot_count,
-                    "snapshot_requested": len(candidate_codes),
+                    "snapshot_requested": len(universe),
                     "snapshot_complete": (
-                        snapshot_count == len(candidate_codes)
+                        snapshot_count == len(universe)
                     ),
                 }
             )
@@ -1178,6 +1444,34 @@ def run_one_live_window(
                     f"record meta FAILED（{recorder.safe_error(exc)}）",
                     flush=True,
                 )
+        if postopen_writer is not None:
+            postopen_writer.close()
+            runtime.finish_aux_recording(postopen_writer)
+            if postopen_metadata is not None and postopen_path is not None:
+                final_postopen_metadata = dict(postopen_metadata)
+                final_postopen_metadata.update(
+                    {
+                        "snapshot_count": postopen_snapshot_count,
+                        "snapshot_requested": len(universe),
+                        "snapshot_complete": (
+                            postopen_snapshot_count == len(universe)
+                        ),
+                        "generated_at": iso_taipei(),
+                        "record_count": postopen_writer.count,
+                    }
+                )
+                try:
+                    write_record_metadata(
+                        postopen_path,
+                        final_postopen_metadata,
+                    )
+                except Exception as exc:
+                    runtime.set_context(service_status="error")
+                    print(
+                        "postopen meta FAILED"
+                        f"（{recorder.safe_error(exc)}）",
+                        flush=True,
+                    )
         if api is not None:
             for contract, quote_type in reversed(active_subscriptions):
                 try:
@@ -1208,6 +1502,7 @@ def live_worker(
     stop_event: threading.Event,
     record_enabled: bool,
     record_out: Path | None,
+    result_out: Path | None = None,
 ) -> None:
     completed_a_window = False
     while not stop_event.is_set():
@@ -1248,6 +1543,7 @@ def live_worker(
                     stop_event=stop_event,
                     record_enabled=record_enabled,
                     record_out=record_out,
+                    result_out=result_out,
                 )
                 break
             except LiveSourceError as exc:
@@ -1325,6 +1621,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="關閉 live 自動錄製（replay 預設即不錄製）",
     )
     parser.add_argument(
+        "--result-out",
+        metavar="PATH",
+        help=(
+            "覆寫 detector result 路徑；live 錄製預設自動寫每日 result"
+        ),
+    )
+    parser.add_argument(
         "--stale-after-sec",
         type=positive_seconds,
         default=DEFAULT_STALE_AFTER_SECONDS,
@@ -1380,6 +1683,9 @@ def main(argv: list[str] | None = None) -> int:
     record_out = (
         relative_path(args.record_out) if args.record_out else None
     )
+    result_out = (
+        relative_path(args.result_out) if args.result_out else None
+    )
 
     if args.replay:
         input_path = relative_path(args.replay)
@@ -1425,6 +1731,7 @@ def main(argv: list[str] | None = None) -> int:
             speed=args.speed,
             stop_event=stop_event,
             record_metadata=metadata if record_out is not None else None,
+            result_path=result_out,
         )
         source_name = "auction-replay-source"
         mode_label = f"replay={input_path.name}；speed={args.speed:g}"
@@ -1454,6 +1761,7 @@ def main(argv: list[str] | None = None) -> int:
             stop_event=stop_event,
             record_enabled=not args.no_record,
             record_out=record_out,
+            result_out=result_out,
         )
         source_name = "auction-live-source"
         mode_label = (

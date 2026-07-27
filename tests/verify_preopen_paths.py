@@ -23,7 +23,13 @@ ROOT = Path(__file__).resolve().parents[1]
 SCANNER = ROOT / "scanner.py"
 FIXTURE_DIR = Path(__file__).resolve().parent / "fixtures"
 LOG_PATH = ROOT / "log" / "preopen-verify-out.txt"
-ACTUAL_INPUT = ROOT / "data" / "auction_20260723.jsonl"
+ACTUAL_INPUT = (
+    ROOT
+    / "data"
+    / "history"
+    / "20260723"
+    / "auction_20260723.jsonl"
+)
 DOCUMENTED_LOCKED = {"2880", "3081", "8039"}
 
 

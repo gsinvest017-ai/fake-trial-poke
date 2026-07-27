@@ -1,5 +1,9 @@
 #!/usr/bin/env python
-"""平日定時確認即時偵測器常駐服務是否已啟動。"""
+"""手動備援看門狗；正式主入口是 schedule_morning.ps1 的 Windows 排程。
+
+請勿讓本程式與「假試撮盤前監控」同時常駐。沒有 Task Scheduler 的環境
+才使用本程式確保同一個 service.py 已在 PORT 8900 提供 UI 與 live 錄製。
+"""
 
 from __future__ import annotations
 

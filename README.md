@@ -45,15 +45,23 @@ SHIOAJI_SECRET_KEY=接手人自己的_secret_key
 
 命令視窗必須保持開啟。關閉視窗或按 `Ctrl+C` 會停止服務。
 
-服務一啟動就會提供網頁；未進入試撮窗口時顯示待命狀態。預設盤前試撮窗口為台北時間 08:30–09:00，服務會自動準備行情連線並在窗口內即時偵測，窗口結束後以 snapshot 收口，之後繼續待命下一個窗口。
+服務一啟動就會提供網頁；未進入試撮窗口時顯示待命狀態。預設盤前試撮窗口為台北時間 08:30–09:00，服務會自動準備行情連線並在窗口內即時偵測，09:00 後以 snapshot 收口判定，再由同一個登入、訂閱與程序續錄到約 09:05，之後繼續待命下一個窗口。
 
 > 目前的日期判斷以平日為主，不包含台灣證券交易所休市日或補交易日行事曆。
 
 ### Live 自動錄製與誠實狀態
 
-Live 模式預設會將送進偵測器的每一筆 `bidask`、`tick`、`snapshot` 原始事件，同步寫入相對於 `service.py` 的 `data\history\YYYYMMDD\auction_YYYYMMDD.jsonl`；日期資料夾不存在時會自動建立。窗口結束後另寫同資料夾、同名的 `.meta.json`，保存 session、window、universe、實際訂閱數，以及每檔股票的 `limit_up`。這些檔案可供後續 replay、`scanner.py` 掃描與分析，不會因即時窗口結束而遺失。
+Live 模式預設由同一個 `service.py` 同時提供 PORT 8900 UI 與每日完整落地。日期資料夾不存在時會自動建立，產物為：
 
-`recorder.py` 的正式錄製也使用相同的日期資料夾慣例；`--smoke` 僅驗證即時管線，不會把測試資料寫進 `history`。平日 08:30–13:35 會嚴格要求收到 callback；其餘時段無連續行情可觀測時，callback 會標示 `SKIP`，但登入、訂閱、snapshot 與清理仍須全部正常。
+- `data\history\YYYYMMDD\auction_YYYYMMDD.jsonl` 與 `.meta.json`：08:30–09:00 盤前 BidAsk，加上 09:00 後全宇宙 snapshot。
+- `data\history\YYYYMMDD\auction_YYYYMMDD_postopen.jsonl` 與 `.meta.json`：09:00–約 09:05 的 BidAsk 續錄，加上 09:05 後全宇宙 snapshot。
+- `data\history\YYYYMMDD\result_YYYYMMDD.json`：直接將既有 `AuctionDetector` 在開盤 snapshot 後的判定原子落地；不另改判定邏輯。
+
+主檔與續錄採 append，服務若在窗口內重啟會保留先前已寫事件；meta 與 result 在收口時更新。這些檔案可供後續 replay、掃描與分析，不會因即時窗口結束而遺失。
+
+`recorder.py` 只保留為獨立診斷工具，不是正式排程入口；它的 `--smoke`
+可驗證登入、訂閱、callback、snapshot 與清理。正式每日錄製一律由
+`service.py` 協調 UI 與上述三組日檔。
 
 如明確不需要落地，可用 `--no-record` 關閉：
 
@@ -64,8 +72,8 @@ python service.py --no-record
 Replay 模式預設只讀取既有檔案，不會再次寫入或覆蓋錄製檔。只有明確提供 `--record-out` 才會把 replay 事件另存到指定路徑；例如可寫入系統暫存目錄，再交給 scanner 驗證：
 
 ```powershell
-python service.py --replay data\history\YYYYMMDD\auction_YYYYMMDD.jsonl --speed 50 --record-out "$env:TEMP\live_rec.jsonl"
-python scanner.py --in "$env:TEMP\live_rec.jsonl" --out "$env:TEMP\live_rec_result.json"
+python service.py --replay data\history\YYYYMMDD\auction_YYYYMMDD.jsonl --speed 50 --record-out "$env:TEMP\live_rec.jsonl" --result-out "$env:TEMP\live_rec_detector_result.json"
+python scanner.py --in "$env:TEMP\live_rec.jsonl" --out "$env:TEMP\live_rec_scanner_result.json"
 ```
 
 `scanner.py` 未提供 `--in` 時，預設讀取今日的 `data\history\YYYYMMDD\auction_YYYYMMDD.jsonl`；未提供 `--out` 時，會依輸入資料的日期將結果寫成 `data\history\YYYYMMDD\result_YYYYMMDD.json`。因此掃描指定歷史檔時可只寫：
@@ -116,9 +124,34 @@ python service.py --replay data\history\YYYYMMDD\auction_YYYYMMDD.jsonl --speed 
 
 移除自動啟動只會刪除捷徑，不會刪除專案、資料或金鑰檔。
 
-## 6. 定時看門狗（選用）
+## 6. 盤前排程與定時看門狗
 
-`scheduler.py` 不是行情服務本身；它會在平日設定時間檢查本機 PORT 8900。若服務已在監聽就跳過，未監聽才使用同一個 Python 啟動 `service.py`。
+Windows 排程任務 `假試撮盤前監控` 是唯一正式主入口：平日
+08:25 呼叫 `schedule_morning.ps1 -Mode Execute -Port 8900`。腳本只負責
+啟動並健康檢查 `service.py`；同一個 service 程序會保持常駐，同時在
+8900 提供 UI，並產生上述盤前、開盤後續錄與 detector result。若健康的
+service 已存在，Action 會直接沿用，不會重複啟動。重新註冊或查詢可使用：
+
+```powershell
+.\schedule_morning.ps1 -Mode Register
+.\schedule_morning.ps1 -Mode Status
+```
+
+註冊流程會明確允許使用電池時啟動、不因切換到電池而停止、喚醒電腦
+執行，並在錯過 08:25 後儘快補啟動。Windows 使用者仍須保持登入
+（鎖定畫面可以），因為本機 UI 任務採目前使用者的互動式登入模式。
+
+在非盤前時段手動觸發同一 Action，service 會先提供 UI 並待命到下一個
+平日窗口；Action 在 `/api/state` 健康後即以 0 結束，service 程序不會
+跟著結束。驗收時可暫時用 `-Port 8901` 註冊與實跑，確認後再以預設
+8900 重新註冊。
+
+### 選用的 UI 服務看門狗
+
+`scheduler.py` 不是正式主入口，也不應與 Windows 排程同時常駐。它只保留
+為沒有 Task Scheduler 時的手動看門狗備援：平日設定時間檢查本機 PORT
+8900，未監聽才啟動同一個 `service.py`。正式環境請使用
+`schedule_morning.ps1` 註冊的 Windows 排程。
 
 查看下一次檢查時點，不啟動服務：
 

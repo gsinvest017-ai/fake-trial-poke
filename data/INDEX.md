@@ -51,7 +51,9 @@ data/
 └─ result_sample.json
 ```
 
-- `recorder.py` 正式錄製與 `service.py` live 錄製都會自動建立當日 `history/YYYYMMDD/`。
+- 正式入口 `service.py` live 會由同一程序自動建立當日
+  `history/YYYYMMDD/`，寫入盤前主檔、09:00–09:05 續錄與 detector
+  result；`recorder.py` 僅保留為獨立診斷工具。
 - `scanner.py` 不給 `--in` 時讀取今日檔；不給 `--out` 時依資料日期將結果寫入對應日期夾。
 - `service.py --replay PATH` 永遠使用明確指定的既有路徑，不會自行改寫來源。
 - `recorder.py --smoke` 與 scanner 的 `--sample` 是測試資料，不會混入每日歷史錄製。
