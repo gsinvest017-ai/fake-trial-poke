@@ -427,6 +427,97 @@
       text-align: right;
     }
 
+    .locked-panel {
+      margin-bottom: 18px;
+      overflow: hidden;
+    }
+
+    .locked-panel-note {
+      margin-top: 3px;
+      text-align: left;
+    }
+
+    .locked-table-wrap {
+      width: 100%;
+      max-width: 100%;
+      min-width: 0;
+      overflow-x: auto;
+      overscroll-behavior-inline: contain;
+      scrollbar-color: var(--line-strong) transparent;
+      scrollbar-width: thin;
+    }
+
+    .locked-table {
+      width: 100%;
+      min-width: 1050px;
+      border-collapse: collapse;
+      background: var(--surface);
+    }
+
+    .locked-table th,
+    .locked-table td {
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--line);
+      text-align: right;
+      white-space: nowrap;
+    }
+
+    .locked-table th {
+      background: var(--paper);
+      color: var(--muted);
+      font-size: 0.68rem;
+      font-weight: 800;
+      letter-spacing: 0.05em;
+    }
+
+    .locked-table th:first-child,
+    .locked-table td:first-child {
+      padding-left: 22px;
+      text-align: left;
+    }
+
+    .locked-table th:nth-child(2),
+    .locked-table td:nth-child(2) {
+      text-align: left;
+    }
+
+    .locked-table th:last-child,
+    .locked-table td:last-child {
+      padding-right: 22px;
+    }
+
+    .locked-table tbody tr:last-child td {
+      border-bottom: 0;
+    }
+
+    .locked-table tbody tr.suspected_fake td:first-child {
+      box-shadow: inset 3px 0 0 var(--fake);
+    }
+
+    .locked-table tbody tr.locked_held td:first-child {
+      box-shadow: inset 3px 0 0 var(--held);
+    }
+
+    .locked-table tbody tr.touched td:first-child {
+      box-shadow: inset 3px 0 0 var(--touched);
+    }
+
+    .locked-table .stock-name {
+      font-size: 0.92rem;
+    }
+
+    .locked-table .status-badge {
+      min-height: 24px;
+      padding: 3px 8px;
+      font-size: 0.68rem;
+    }
+
+    .locked-table-value {
+      color: var(--ink);
+      font-size: 0.82rem;
+      font-weight: 750;
+    }
+
     .anomaly-panel {
       margin-bottom: 18px;
       overflow: hidden;
@@ -1158,6 +1249,22 @@
       </div>
     </section>
 
+    <section class="panel locked-panel" aria-labelledby="locked-title">
+      <header class="panel-header">
+        <div>
+          <h2 class="panel-title" id="locked-title">曾鎖漲停</h2>
+          <p class="panel-meta locked-panel-note">盤中一鎖即列入・每秒更新</p>
+        </div>
+        <p class="panel-meta" id="locked-summary">0 檔</p>
+      </header>
+      <div class="locked-table-wrap" id="locked-table-wrap" aria-live="polite">
+        <div class="empty-state">
+          <span class="empty-icon" aria-hidden="true">◇</span>
+          今日尚無個股鎖過漲停
+        </div>
+      </div>
+    </section>
+
     <section class="panel anomaly-panel" aria-labelledby="anomalies-title">
       <header class="panel-header">
         <div class="anomaly-heading">
@@ -1260,6 +1367,8 @@
         lastEventAge: document.getElementById("last-event-age"),
         loginStatus: document.getElementById("login-status"),
         subscribeStatus: document.getElementById("subscribe-status"),
+        lockedSummary: document.getElementById("locked-summary"),
+        lockedTableWrap: document.getElementById("locked-table-wrap"),
         anomalySummary: document.getElementById("anomaly-summary"),
         anomalyThresholdNote: document.getElementById("anomaly-threshold-note"),
         anomalyGrid: document.getElementById("anomaly-grid"),
@@ -1334,6 +1443,32 @@
       function formatTime(value) {
         const parsed = parseTime(value);
         return parsed ? shortTimeFormatter.format(parsed) : "—";
+      }
+
+      function isMissing(value) {
+        return value === null || value === undefined || value === "";
+      }
+
+      function formatOptionalPrice(value) {
+        return isMissing(value) ? "—" : formatPrice(value);
+      }
+
+      function formatOptionalVolume(value) {
+        return isMissing(value) ? "—" : formatVolume(value);
+      }
+
+      function formatOptionalPercent(value, signed = false) {
+        return isMissing(value) ? "—" : formatPercent(value, signed);
+      }
+
+      function formatDuration(value) {
+        if (isMissing(value)) return "—";
+        const duration = finiteNumber(value);
+        if (duration === null || duration < 0) return "—";
+        const totalSeconds = Math.round(duration);
+        const minutes = Math.floor(totalSeconds / 60);
+        const seconds = totalSeconds % 60;
+        return minutes > 0 ? `${minutes} 分 ${seconds} 秒` : `${seconds} 秒`;
       }
 
       function countdown(targetValue) {
@@ -1519,6 +1654,100 @@
           card.append(head, hits, metrics, note);
           elements.anomalyGrid.append(card);
         });
+      }
+
+      function renderLockedStocks(stocks) {
+        const statusRank = {
+          suspected_fake: 0,
+          locked_held: 1,
+          touched: 2
+        };
+        const lockedStocks = stocks
+          .filter((stock) => Boolean(stock.locked_limit_up ?? stock.locked))
+          .sort((left, right) => {
+            const rankDiff = (statusRank[left.status] ?? 99) - (statusRank[right.status] ?? 99);
+            const durationDiff = (finiteNumber(right.lock_duration_sec) ?? -1)
+              - (finiteNumber(left.lock_duration_sec) ?? -1);
+            return rankDiff
+              || durationDiff
+              || safeText(left.code, "").localeCompare(safeText(right.code, ""));
+          });
+
+        elements.lockedSummary.textContent = `${numberFormatter.format(lockedStocks.length)} 檔`;
+        elements.lockedTableWrap.replaceChildren();
+        if (!lockedStocks.length) {
+          const empty = makeElement("div", "empty-state");
+          empty.append(
+            makeElement("span", "empty-icon", "◇"),
+            document.createTextNode("今日尚無個股鎖過漲停")
+          );
+          elements.lockedTableWrap.append(empty);
+          return;
+        }
+
+        const table = makeElement("table", "locked-table");
+        table.setAttribute("aria-label", "今日曾鎖漲停個股");
+        const head = document.createElement("thead");
+        const headRow = document.createElement("tr");
+        [
+          "代碼／名稱",
+          "結局",
+          "首次鎖住",
+          "鎖住時長",
+          "漲停價",
+          "掛單峰量",
+          "撤單 %",
+          "開盤價",
+          "開盤缺口 %"
+        ].forEach((label) => {
+          const cell = makeElement("th", "", label);
+          cell.setAttribute("scope", "col");
+          headRow.append(cell);
+        });
+        head.append(headRow);
+
+        const body = document.createElement("tbody");
+        lockedStocks.forEach((stock) => {
+          const statusKey = Object.prototype.hasOwnProperty.call(statusRank, stock.status)
+            ? stock.status
+            : "touched";
+          const status = STATUS[statusKey];
+          const row = makeElement("tr", status.className);
+
+          const identity = makeElement("td", "locked-stock");
+          identity.append(
+            makeElement("span", "stock-code", safeText(stock.code)),
+            makeElement("span", "stock-name", safeText(stock.name, "未命名"))
+          );
+
+          const conclusion = document.createElement("td");
+          conclusion.append(
+            makeElement(
+              "span",
+              `status-badge ${status.className}`,
+              `${status.icon} ${status.label}`
+            )
+          );
+
+          const peakVolume = stock.max_bid0_volume ?? stock.bid0_peak_volume;
+          const values = [
+            formatTime(stock.first_lock_time),
+            formatDuration(stock.lock_duration_sec),
+            formatOptionalPrice(stock.limit_up),
+            formatOptionalVolume(peakVolume),
+            formatOptionalPercent(stock.bid0_withdraw_pct),
+            formatOptionalPrice(stock.open_price),
+            formatOptionalPercent(stock.open_gap_pct, true)
+          ];
+          row.append(identity, conclusion);
+          values.forEach((value) => {
+            row.append(makeElement("td", "locked-table-value", value));
+          });
+          body.append(row);
+        });
+
+        table.append(head, body);
+        elements.lockedTableWrap.append(table);
       }
 
       function renderStocks(stocks) {
@@ -1840,6 +2069,7 @@
           elements.connectionNote.textContent = "API 已連線・每秒更新";
           elements.connectionNote.className = "connection-note";
         }
+        renderLockedStocks(stocks);
         renderAnomalies(stocks, state.anomaly_thresholds);
         renderStocks(stocks);
         renderAlerts(alerts);

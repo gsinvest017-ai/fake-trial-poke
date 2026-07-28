@@ -381,6 +381,42 @@ def write_detector_result(
     return resolved_path
 
 
+def notify_telegram_result(result_path: Path) -> None:
+    """安全送出已落地的盤前判定；任何通知問題都不影響主流程。"""
+    try:
+        import telegram_notify
+
+        result_payload = json.loads(
+            result_path.read_text(encoding="utf-8")
+        )
+        telegram_message = telegram_notify.build_telegram_message(
+            result_payload
+        )
+        sent_count = telegram_notify.send_telegram_message(
+            telegram_message
+        )
+    except Exception as exc:
+        print(
+            f"TEL 通知失敗：{type(exc).__name__}",
+            flush=True,
+        )
+        return
+
+    if sent_count is None:
+        print("TEL 憑證未設定，略過發送", flush=True)
+        return
+
+    locked_count = len(
+        telegram_notify.locked_limit_up_stocks(result_payload)
+    )
+    print(
+        "TEL 通知成功："
+        f"曾鎖漲停={locked_count}；"
+        f"訊息字數={len(telegram_message)}",
+        flush=True,
+    )
+
+
 class SharedState:
     """提供 webserver 無鎖外洩風險的 thread-safe JSON snapshot。"""
 
@@ -1333,6 +1369,8 @@ def run_one_live_window(
                     "盤前 meta/result 落地 FAILED"
                 ) from exc
             print(f"detector result={written_result}", flush=True)
+            if session == "preopen":
+                notify_telegram_result(written_result)
         print(
             f"窗口收口：snapshot={snapshot_count}/{len(universe)}；"
             "counts="

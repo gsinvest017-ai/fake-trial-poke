@@ -177,6 +177,7 @@ class _StockState:
     seen_stream: bool = False
     locked: bool = False
     first_lock: datetime | None = None
+    last_lock: datetime | None = None
     sim_high: float = 0.0
     bid0_price: float | None = None
     bid0_volume: int | None = None
@@ -548,11 +549,16 @@ class Detector:
             if (
                 state.limit_up is not None
                 and _same_price(bid0, state.limit_up)
-                and not state.locked
             ):
-                state.locked = True
-                state.first_lock = event_at
-                self._push_alert(state, "locked", event_at)
+                if not state.locked:
+                    state.locked = True
+                    state.first_lock = event_at
+                    self._push_alert(state, "locked", event_at)
+                if (
+                    state.last_lock is None
+                    or event_at >= state.last_lock
+                ):
+                    state.last_lock = event_at
 
         lookback_start = window_end - timedelta(
             seconds=self.drop_lookback_seconds
@@ -889,6 +895,14 @@ class Detector:
         )
 
     def _public_stock(self, state: _StockState) -> dict[str, Any]:
+        lock_duration_sec = (
+            round(
+                (state.last_lock - state.first_lock).total_seconds(),
+                3,
+            )
+            if state.first_lock is not None and state.last_lock is not None
+            else 0.0
+        )
         return {
             "code": state.code,
             "name": state.name,
@@ -898,16 +912,20 @@ class Detector:
             "status_label": STATUS_LABELS[state.status],
             # locked 代表窗口內曾鎖過，對應舊 scanner.locked_limit_up。
             "locked": state.locked,
+            "locked_limit_up": state.locked,
             "bid0_price": state.bid0_price,
             "bid0_volume": state.bid0_volume,
             "sim_high": state.sim_high,
             "first_lock_time": _iso_seconds(state.first_lock),
+            "last_lock_time": _iso_seconds(state.last_lock),
+            "lock_duration_sec": lock_duration_sec,
             "open_price": state.open_price,
             "open_gap_pct": state.open_gap_pct,
             "bid0_dropped": state.bid0_dropped,
             "anomalies": list(state.anomalies),
             "anomaly_score": state.anomaly_score,
             "bid0_peak_volume": state.bid0_peak_volume,
+            "max_bid0_volume": state.bid0_peak_volume,
             "final_window_bid0_volume": state.anomaly_final_bid0_volume,
             "bid0_withdraw_pct": state.bid0_withdraw_pct,
             "bid0_min_price": state.bid0_min_price,

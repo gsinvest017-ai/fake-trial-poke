@@ -100,6 +100,7 @@ class DetectorTests(unittest.TestCase):
 
         result = stock(detector, "9001")
         self.assertTrue(result["locked"])
+        self.assertTrue(result["locked_limit_up"])
         self.assertEqual(result["status"], "touched")
         self.assertEqual(result["sim_high"], 100.0)
         self.assertTrue(
@@ -107,8 +108,26 @@ class DetectorTests(unittest.TestCase):
                 "2026-07-24T08:59:50"
             )
         )
+        self.assertTrue(
+            str(result["last_lock_time"]).startswith(
+                "2026-07-24T08:59:50"
+            )
+        )
+        self.assertEqual(result["lock_duration_sec"], 0.0)
+        self.assertEqual(result["max_bid0_volume"], 5000)
         self.assertEqual(detector.get_state()["counts"]["touched"], 1)
         self.assertEqual(detector.get_state()["alerts"][0]["type"], "locked")
+
+        detector.process_event(
+            bidask("9001", "2026-07-24T08:59:55", 100.0, 4000)
+        )
+        result = stock(detector, "9001")
+        self.assertTrue(
+            str(result["last_lock_time"]).startswith(
+                "2026-07-24T08:59:55"
+            )
+        )
+        self.assertEqual(result["lock_duration_sec"], 5.0)
 
     def test_open_zero_is_unknown_and_snapshot_quote_means_held(self) -> None:
         detector = self.make_detector(

@@ -59,6 +59,25 @@ Live 模式預設由同一個 `service.py` 同時提供 PORT 8900 UI 與每日�
 
 主檔與續錄採 append，服務若在窗口內重啟會保留先前已寫事件；meta 與 result 在收口時更新。這些檔案可供後續 replay、掃描與分析，不會因即時窗口結束而遺失。
 
+### Telegram 盤前判定通知
+
+請先建立一個新的 Telegram bot，再把該新 bot 的 token 與接收對象 chat
+id 填入專案根目錄 `.env`；不要複製或沿用其他專案的憑證：
+
+```dotenv
+TELEGRAM_BOT_TOKEN=使用者之後建立的新_bot_token
+TELEGRAM_CHAT_ID=使用者之後指定的_chat_id
+```
+
+通知不另設固定 09:00 排程。只有 live `preopen` 在開盤 snapshot 收口、
+`result_YYYYMMDD.json` 成功落地後才會立即送出，正常約在 09:00:10；
+此時訊息才能比較試撮曾鎖漲停與實際開盤結果。Replay、`preclose` 與
+`--no-record` 不會發送。
+
+兩個 Telegram 欄位保持空白是正常未設定狀態，服務會印出
+`TEL 憑證未設定，略過發送` 並繼續錄製與判定。網路或 Telegram API
+失敗也只會留下不含憑證的失敗紀錄，不會中斷主流程。
+
 `recorder.py` 只保留為獨立診斷工具，不是正式排程入口；它的 `--smoke`
 可驗證登入、訂閱、callback、snapshot 與清理。正式每日錄製一律由
 `service.py` 協調 UI 與上述三組日檔。

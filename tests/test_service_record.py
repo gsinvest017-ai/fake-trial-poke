@@ -22,6 +22,7 @@ sys.path.insert(
 import scanner
 import recorder
 import service
+import telegram_notify
 import webserver
 
 
@@ -330,12 +331,17 @@ class ServiceRecordTests(unittest.TestCase):
             replay_meta, rows = service.load_replay(source_path)
             runtime, _unused = self.make_runtime()
             runtime.set_context(service_status="replay")
-            service.replay_worker(
-                runtime,
-                rows,
-                speed=1_000_000_000.0,
-                stop_event=threading.Event(),
-            )
+            with mock.patch.object(
+                service,
+                "notify_telegram_result",
+            ) as notify_result:
+                service.replay_worker(
+                    runtime,
+                    rows,
+                    speed=1_000_000_000.0,
+                    stop_event=threading.Event(),
+                )
+            notify_result.assert_not_called()
             state = runtime.publish()
             after = {
                 path.name: path.read_bytes()
@@ -543,6 +549,10 @@ class ServiceRecordTests(unittest.TestCase):
                     "SNAPSHOT_AFTER_END_SECONDS",
                     0.01,
                 ),
+                mock.patch.object(
+                    service,
+                    "notify_telegram_result",
+                ) as notify_result,
             ):
                 completed = service.run_one_live_window(
                     runtime,
@@ -556,6 +566,7 @@ class ServiceRecordTests(unittest.TestCase):
                     result_out=result_path,
                 )
 
+            notify_result.assert_called_once_with(result_path.resolve())
             postopen_path = service.paired_postopen_path(record_path)
             self.assertTrue(completed)
             for artifact in (
@@ -590,6 +601,60 @@ class ServiceRecordTests(unittest.TestCase):
             self.assertEqual(result["detector"], "AuctionDetector")
             self.assertEqual(result["subscribed"], 1)
             self.assertFalse(runtime.publish()["recording"])
+
+    def test_unconfigured_telegram_is_a_normal_skip(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result_path = pathlib.Path(temp_dir) / "result.json"
+            result_path.write_text(
+                json.dumps(
+                    {
+                        "date": "2026-07-24",
+                        "stocks": [],
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            with (
+                mock.patch.object(
+                    telegram_notify,
+                    "send_telegram_message",
+                    return_value=None,
+                ),
+                mock.patch("builtins.print") as print_output,
+            ):
+                service.notify_telegram_result(result_path)
+
+        print_output.assert_called_once_with(
+            "TEL 憑證未設定，略過發送",
+            flush=True,
+        )
+
+    def test_telegram_failure_does_not_escape_or_log_credentials(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result_path = pathlib.Path(temp_dir) / "result.json"
+            result_path.write_text(
+                '{"date":"2026-07-24","stocks":[]}',
+                encoding="utf-8",
+            )
+            with (
+                mock.patch.object(
+                    telegram_notify,
+                    "send_telegram_message",
+                    side_effect=telegram_notify.TelegramSendError(
+                        "安全的模擬失敗"
+                    ),
+                ),
+                mock.patch("builtins.print") as print_output,
+            ):
+                service.notify_telegram_result(result_path)
+
+        print_output.assert_called_once_with(
+            "TEL 通知失敗：TelegramSendError",
+            flush=True,
+        )
 
     def test_login_or_subscription_failure_reports_error(self) -> None:
         for login_ok, subscribe_ok in ((False, False), (True, False)):
