@@ -46,6 +46,7 @@ PUBLISH_INTERVAL_SECONDS = 0.2
 SUBSCRIBE_EVENT_GRACE_SECONDS = 0.01
 LOGIN_RETRY_SECONDS = 30.0
 DEFAULT_STALE_AFTER_SECONDS = 10.0
+TELEGRAM_NOTIFY_DEADLINE_SECONDS = 60.0
 
 
 def _default_port() -> int:
@@ -381,20 +382,53 @@ def write_detector_result(
     return resolved_path
 
 
-def notify_telegram_result(result_path: Path) -> None:
+def notify_telegram_result(
+    result_path: Path,
+    *,
+    deadline_seconds: float = TELEGRAM_NOTIFY_DEADLINE_SECONDS,
+) -> None:
     """安全送出已落地的盤前判定；任何通知問題都不影響主流程。"""
-    try:
-        import telegram_notify
+    deadline = time.monotonic() + max(0.0, deadline_seconds)
+    completed = threading.Event()
+    outcome: dict[str, Any] = {}
 
-        result_payload = json.loads(
-            result_path.read_text(encoding="utf-8")
+    def send_result() -> None:
+        try:
+            import telegram_notify
+
+            result_payload = json.loads(
+                result_path.read_text(encoding="utf-8")
+            )
+            telegram_message = telegram_notify.build_telegram_message(
+                result_payload
+            )
+            sent_count = telegram_notify.send_telegram_message(
+                telegram_message,
+                deadline=deadline,
+            )
+            outcome.update(
+                {
+                    "sent_count": sent_count,
+                    "locked_count": len(
+                        telegram_notify.locked_limit_up_stocks(
+                            result_payload
+                        )
+                    ),
+                    "message_length": len(telegram_message),
+                }
+            )
+        except Exception as exc:
+            outcome["error_type"] = type(exc).__name__
+        finally:
+            completed.set()
+
+    try:
+        sender_thread = threading.Thread(
+            target=send_result,
+            name="telegram-result-send",
+            daemon=True,
         )
-        telegram_message = telegram_notify.build_telegram_message(
-            result_payload
-        )
-        sent_count = telegram_notify.send_telegram_message(
-            telegram_message
-        )
+        sender_thread.start()
     except Exception as exc:
         print(
             f"TEL 通知失敗：{type(exc).__name__}",
@@ -402,19 +436,43 @@ def notify_telegram_result(result_path: Path) -> None:
         )
         return
 
-    if sent_count is None:
+    remaining = max(0.0, deadline - time.monotonic())
+    if not completed.wait(timeout=remaining):
+        print("TEL 通知失敗：TimeoutError", flush=True)
+        return
+
+    error_type = outcome.get("error_type")
+    if error_type is not None:
+        print(f"TEL 通知失敗：{error_type}", flush=True)
+        return
+
+    if outcome.get("sent_count") is None:
         print("TEL 憑證未設定，略過發送", flush=True)
         return
 
-    locked_count = len(
-        telegram_notify.locked_limit_up_stocks(result_payload)
-    )
     print(
         "TEL 通知成功："
-        f"曾鎖漲停={locked_count}；"
-        f"訊息字數={len(telegram_message)}",
+        f"曾鎖漲停={outcome['locked_count']}；"
+        f"訊息字數={outcome['message_length']}",
         flush=True,
     )
+
+
+def start_telegram_result_notification(result_path: Path) -> None:
+    """以 daemon 執行緒送出通知，live 收口主流程不等待結果。"""
+    try:
+        notification_thread = threading.Thread(
+            target=notify_telegram_result,
+            args=(result_path,),
+            name="telegram-result-notify",
+            daemon=True,
+        )
+        notification_thread.start()
+    except Exception as exc:
+        print(
+            f"TEL 通知失敗：{type(exc).__name__}",
+            flush=True,
+        )
 
 
 class SharedState:
@@ -1370,7 +1428,7 @@ def run_one_live_window(
                 ) from exc
             print(f"detector result={written_result}", flush=True)
             if session == "preopen":
-                notify_telegram_result(written_result)
+                start_telegram_result_notification(written_result)
         print(
             f"窗口收口：snapshot={snapshot_count}/{len(universe)}；"
             "counts="

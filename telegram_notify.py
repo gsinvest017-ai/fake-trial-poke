@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import json
+import time
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
@@ -188,6 +189,19 @@ def build_telegram_message(
     if not isinstance(result, dict):
         raise TypeError("result 必須是 dict")
 
+    raw_stocks = result.get("stocks")
+    if not isinstance(raw_stocks, list):
+        title = f"{_date_text(result.get('date'))} 盤前試撮鎖漲停判定"
+        if prefix:
+            title = f"{prefix.strip()}｜{title}"
+        return "\n".join(
+            (
+                title,
+                "",
+                "result 格式異常，無法判定鎖漲停清單",
+            )
+        )
+
     stocks = locked_limit_up_stocks(result)
     counts = {
         status: sum(stock.get("status") == status for stock in stocks)
@@ -308,10 +322,12 @@ def send_telegram_message(
     *,
     env_path: Path | str = DEFAULT_ENV_PATH,
     timeout: float = 15.0,
+    deadline: float | None = None,
 ) -> int | None:
     """送出純文字訊息。
 
     成功時回傳 API 請求數；憑證缺漏或空白時回傳 ``None`` 且不連網。
+    ``deadline`` 是 ``time.monotonic()`` 絕對秒，逾期即停止後續分段。
     讀檔、網路與 API 失敗會拋出不含憑證的通知器例外，交由呼叫端處理。
     """
     if not isinstance(message, str) or not message.strip():
@@ -324,11 +340,17 @@ def send_telegram_message(
     token, chat_id = config
     chunks = _split_message(message)
     for chunk in chunks:
+        chunk_timeout = timeout
+        if deadline is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TelegramSendError("Telegram 通知超過整體期限")
+            chunk_timeout = min(timeout, remaining)
         _send_chunk(
             chunk,
             token=token,
             chat_id=chat_id,
-            timeout=timeout,
+            timeout=chunk_timeout,
         )
     return len(chunks)
 

@@ -1383,6 +1383,7 @@
       let seenAlerts = new Set();
       let initializedAlerts = false;
       let pollTimer = null;
+      let lockedTableRenderKey = null;
 
       const numberFormatter = new Intl.NumberFormat("zh-TW");
       const priceFormatter = new Intl.NumberFormat("zh-TW", {
@@ -1673,7 +1674,31 @@
               || safeText(left.code, "").localeCompare(safeText(right.code, ""));
           });
 
+        const renderRows = lockedStocks.map((stock) => {
+          const statusKey = Object.prototype.hasOwnProperty.call(statusRank, stock.status)
+            ? stock.status
+            : "touched";
+          const status = STATUS[statusKey];
+          const peakVolume = stock.max_bid0_volume ?? stock.bid0_peak_volume;
+          return [
+            safeText(stock.code),
+            safeText(stock.name, "未命名"),
+            statusKey,
+            status.icon,
+            status.label,
+            formatTime(stock.first_lock_time),
+            formatDuration(stock.lock_duration_sec),
+            formatOptionalPrice(stock.limit_up),
+            formatOptionalVolume(peakVolume),
+            formatOptionalPercent(stock.bid0_withdraw_pct),
+            formatOptionalPrice(stock.open_price),
+            formatOptionalPercent(stock.open_gap_pct, true)
+          ];
+        });
+        const renderKey = JSON.stringify(renderRows);
         elements.lockedSummary.textContent = `${numberFormatter.format(lockedStocks.length)} 檔`;
+        if (renderKey === lockedTableRenderKey) return;
+        lockedTableRenderKey = renderKey;
         elements.lockedTableWrap.replaceChildren();
         if (!lockedStocks.length) {
           const empty = makeElement("div", "empty-state");
@@ -1707,17 +1732,15 @@
         head.append(headRow);
 
         const body = document.createElement("tbody");
-        lockedStocks.forEach((stock) => {
-          const statusKey = Object.prototype.hasOwnProperty.call(statusRank, stock.status)
-            ? stock.status
-            : "touched";
+        renderRows.forEach((values) => {
+          const statusKey = values[2];
           const status = STATUS[statusKey];
           const row = makeElement("tr", status.className);
 
           const identity = makeElement("td", "locked-stock");
           identity.append(
-            makeElement("span", "stock-code", safeText(stock.code)),
-            makeElement("span", "stock-name", safeText(stock.name, "未命名"))
+            makeElement("span", "stock-code", values[0]),
+            makeElement("span", "stock-name", values[1])
           );
 
           const conclusion = document.createElement("td");
@@ -1729,18 +1752,8 @@
             )
           );
 
-          const peakVolume = stock.max_bid0_volume ?? stock.bid0_peak_volume;
-          const values = [
-            formatTime(stock.first_lock_time),
-            formatDuration(stock.lock_duration_sec),
-            formatOptionalPrice(stock.limit_up),
-            formatOptionalVolume(peakVolume),
-            formatOptionalPercent(stock.bid0_withdraw_pct),
-            formatOptionalPrice(stock.open_price),
-            formatOptionalPercent(stock.open_gap_pct, true)
-          ];
           row.append(identity, conclusion);
-          values.forEach((value) => {
+          values.slice(5).forEach((value) => {
             row.append(makeElement("td", "locked-table-value", value));
           });
           body.append(row);

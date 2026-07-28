@@ -333,15 +333,15 @@ class ServiceRecordTests(unittest.TestCase):
             runtime.set_context(service_status="replay")
             with mock.patch.object(
                 service,
-                "notify_telegram_result",
-            ) as notify_result:
+                "start_telegram_result_notification",
+            ) as start_notification:
                 service.replay_worker(
                     runtime,
                     rows,
                     speed=1_000_000_000.0,
                     stop_event=threading.Event(),
                 )
-            notify_result.assert_not_called()
+            start_notification.assert_not_called()
             state = runtime.publish()
             after = {
                 path.name: path.read_bytes()
@@ -503,6 +503,17 @@ class ServiceRecordTests(unittest.TestCase):
         fake_constant = types.ModuleType("shioaji.constant")
         fake_constant.QuoteType = SimpleNamespace(BidAsk="bidask")
         fake_constant.QuoteVersion = SimpleNamespace(v1="v1")
+        notification_started = threading.Event()
+        notification_release = threading.Event()
+        notification_finished = threading.Event()
+        notification_daemon: list[bool] = []
+        self.addCleanup(notification_release.set)
+
+        def slow_notification(_result_path: pathlib.Path) -> None:
+            notification_daemon.append(threading.current_thread().daemon)
+            notification_started.set()
+            notification_release.wait(timeout=5)
+            notification_finished.set()
 
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = pathlib.Path(temp_dir)
@@ -552,6 +563,7 @@ class ServiceRecordTests(unittest.TestCase):
                 mock.patch.object(
                     service,
                     "notify_telegram_result",
+                    side_effect=slow_notification,
                 ) as notify_result,
             ):
                 completed = service.run_one_live_window(
@@ -566,6 +578,9 @@ class ServiceRecordTests(unittest.TestCase):
                     result_out=result_path,
                 )
 
+            self.assertTrue(notification_started.wait(timeout=1))
+            self.assertFalse(notification_finished.is_set())
+            self.assertEqual(notification_daemon, [True])
             notify_result.assert_called_once_with(result_path.resolve())
             postopen_path = service.paired_postopen_path(record_path)
             self.assertTrue(completed)
@@ -601,6 +616,132 @@ class ServiceRecordTests(unittest.TestCase):
             self.assertEqual(result["detector"], "AuctionDetector")
             self.assertEqual(result["subscribed"], 1)
             self.assertFalse(runtime.publish()["recording"])
+            notification_release.set()
+            self.assertTrue(notification_finished.wait(timeout=1))
+
+    def test_preclose_and_no_record_do_not_start_telegram(self) -> None:
+        class FakeQuote:
+            def set_event_callback(self, _callback: object) -> None:
+                return None
+
+            def set_on_bidask_stk_v1_callback(
+                self,
+                _callback: object,
+            ) -> None:
+                return None
+
+            def subscribe(self, *_args: object, **_kwargs: object) -> None:
+                return None
+
+            def unsubscribe(
+                self,
+                *_args: object,
+                **_kwargs: object,
+            ) -> None:
+                return None
+
+        class FakeApi:
+            def __init__(self) -> None:
+                self.quote = FakeQuote()
+
+            def login(self, **_kwargs: object) -> list[object]:
+                return []
+
+            def snapshots(
+                self,
+                _contracts: object,
+                **_kwargs: object,
+            ) -> list[object]:
+                return []
+
+            def logout(self) -> None:
+                return None
+
+        contract = SimpleNamespace(
+            code="9001",
+            name="測試股",
+            reference=90.9,
+            limit_up=100.0,
+        )
+        fake_shioaji = types.ModuleType("shioaji")
+        fake_shioaji.Shioaji = FakeApi
+        fake_constant = types.ModuleType("shioaji.constant")
+        fake_constant.QuoteType = SimpleNamespace(BidAsk="bidask")
+        fake_constant.QuoteVersion = SimpleNamespace(v1="v1")
+
+        with (
+            tempfile.TemporaryDirectory() as temp_dir,
+            mock.patch.dict(
+                sys.modules,
+                {
+                    "shioaji": fake_shioaji,
+                    "shioaji.constant": fake_constant,
+                },
+            ),
+            mock.patch.object(
+                service,
+                "_configure_quiet_solace",
+                return_value=None,
+            ),
+            mock.patch.object(
+                service,
+                "load_live_credentials",
+                return_value=("placeholder", "placeholder"),
+            ),
+            mock.patch.object(
+                recorder,
+                "wait_for_contracts",
+                return_value=None,
+            ),
+            mock.patch.object(
+                recorder,
+                "requested_universe",
+                return_value=([(contract.code, contract)], [], 1),
+            ),
+            mock.patch.object(
+                service,
+                "SNAPSHOT_AFTER_END_SECONDS",
+                0,
+            ),
+            mock.patch.object(
+                service,
+                "start_telegram_result_notification",
+            ) as start_notification,
+        ):
+            temp_path = pathlib.Path(temp_dir)
+            scenarios = (
+                ("preclose", True, "preclose-record"),
+                ("preopen", False, "preopen-no-record"),
+            )
+            for session, record_enabled, label in scenarios:
+                with self.subTest(label=label):
+                    now = service.taipei_now()
+                    start_at = now - timedelta(milliseconds=20)
+                    end_at = now + timedelta(milliseconds=10)
+                    record_path = temp_path / f"{label}.jsonl"
+                    result_path = temp_path / f"{label}.json"
+                    runtime = service.ServiceRuntime(
+                        session=session,
+                        window_start=service.iso_taipei(start_at),
+                        window_end=service.iso_taipei(end_at),
+                        service_status="armed",
+                    )
+                    completed = service.run_one_live_window(
+                        runtime,
+                        session=session,
+                        start_at=start_at,
+                        end_at=end_at,
+                        universe_spec=None,
+                        stop_event=threading.Event(),
+                        record_enabled=record_enabled,
+                        record_out=(
+                            record_path if record_enabled else None
+                        ),
+                        result_out=result_path,
+                    )
+
+                    self.assertTrue(completed)
+                    start_notification.assert_not_called()
 
     def test_unconfigured_telegram_is_a_normal_skip(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -620,13 +761,85 @@ class ServiceRecordTests(unittest.TestCase):
                     telegram_notify,
                     "send_telegram_message",
                     return_value=None,
+                ) as send_message,
+                mock.patch.object(
+                    service.time,
+                    "monotonic",
+                    return_value=100.0,
                 ),
                 mock.patch("builtins.print") as print_output,
             ):
                 service.notify_telegram_result(result_path)
 
+        send_message.assert_called_once_with(
+            mock.ANY,
+            deadline=160.0,
+        )
         print_output.assert_called_once_with(
             "TEL 憑證未設定，略過發送",
+            flush=True,
+        )
+
+    def test_telegram_overall_deadline_returns_while_send_is_stuck(
+        self,
+    ) -> None:
+        started = threading.Event()
+        release = threading.Event()
+        finished = threading.Event()
+        self.addCleanup(release.set)
+
+        def stuck_send(*_args: object, **_kwargs: object) -> int:
+            started.set()
+            release.wait(timeout=1)
+            finished.set()
+            return 1
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result_path = pathlib.Path(temp_dir) / "result.json"
+            result_path.write_text(
+                '{"date":"2026-07-24","stocks":[]}',
+                encoding="utf-8",
+            )
+            with (
+                mock.patch.object(
+                    telegram_notify,
+                    "send_telegram_message",
+                    side_effect=stuck_send,
+                ),
+                mock.patch.object(
+                    service.time,
+                    "monotonic",
+                    side_effect=(100.0, 100.0),
+                ),
+                mock.patch("builtins.print") as print_output,
+            ):
+                service.notify_telegram_result(
+                    result_path,
+                    deadline_seconds=0.01,
+                )
+                self.assertTrue(started.is_set())
+                print_output.assert_called_once_with(
+                    "TEL 通知失敗：TimeoutError",
+                    flush=True,
+                )
+                release.set()
+                self.assertTrue(finished.wait(timeout=1))
+
+    def test_telegram_thread_start_failure_does_not_escape(self) -> None:
+        with (
+            mock.patch.object(
+                service.threading,
+                "Thread",
+                side_effect=RuntimeError("模擬執行緒啟動失敗"),
+            ),
+            mock.patch("builtins.print") as print_output,
+        ):
+            service.start_telegram_result_notification(
+                pathlib.Path("result.json")
+            )
+
+        print_output.assert_called_once_with(
+            "TEL 通知失敗：RuntimeError",
             flush=True,
         )
 

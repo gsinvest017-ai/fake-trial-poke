@@ -129,6 +129,56 @@ class DetectorTests(unittest.TestCase):
         )
         self.assertEqual(result["lock_duration_sec"], 5.0)
 
+    def test_lock_duration_accumulates_only_locked_intervals(self) -> None:
+        detector = self.make_detector(
+            {"code": "DURATION", "name": "累計時長", "limit_up": 100.0}
+        )
+        events = [
+            # 鎖 60 秒。
+            bidask(
+                "DURATION", "2026-07-24T08:30:00", 100.0, 5000
+            ),
+            bidask(
+                "DURATION", "2026-07-24T08:31:00", 99.0, 4000
+            ),
+            # 解鎖 120 秒後再鎖 30 秒。
+            bidask(
+                "DURATION", "2026-07-24T08:33:00", 100.0, 3000
+            ),
+            bidask(
+                "DURATION", "2026-07-24T08:33:30", 100.0, 2000
+            ),
+        ]
+        detector.process_events(events)
+
+        result = stock(detector, "DURATION")
+        self.assertEqual(result["lock_duration_sec"], 90.0)
+        self.assertTrue(
+            str(result["first_lock_time"]).startswith(
+                "2026-07-24T08:30:00"
+            )
+        )
+        self.assertTrue(
+            str(result["last_lock_time"]).startswith(
+                "2026-07-24T08:33:30"
+            )
+        )
+
+        # 窗口後 snapshot 不得把最後鎖住狀態外推到 snapshot 時間。
+        detector.process_event(
+            snapshot(
+                "DURATION",
+                "2026-07-24T09:00:03",
+                100.0,
+                100.0,
+                2000,
+            )
+        )
+        self.assertEqual(
+            stock(detector, "DURATION")["lock_duration_sec"],
+            90.0,
+        )
+
     def test_open_zero_is_unknown_and_snapshot_quote_means_held(self) -> None:
         detector = self.make_detector(
             {"code": "9002", "name": "零開盤", "limit_up": 100.0}

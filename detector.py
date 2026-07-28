@@ -178,6 +178,9 @@ class _StockState:
     locked: bool = False
     first_lock: datetime | None = None
     last_lock: datetime | None = None
+    lock_duration_sec: float = 0.0
+    lock_timeline_at: datetime | None = None
+    lock_timeline_active: bool = False
     sim_high: float = 0.0
     bid0_price: float | None = None
     bid0_volume: int | None = None
@@ -521,6 +524,23 @@ class Detector:
         simtrade = event.get("simtrade") is True
         in_window = window_start <= event_at < window_end
         if simtrade and in_window:
+            is_locked = (
+                state.limit_up is not None
+                and _same_price(bid0, state.limit_up)
+            )
+            # 只由窗口內試撮 BidAsk 建立鎖定時間線。相鄰事件區間沿用
+            # 前一事件狀態；過期事件與 snapshot/tick 不回寫或外推秒數。
+            if state.lock_timeline_at is None:
+                state.lock_timeline_at = event_at
+                state.lock_timeline_active = is_locked
+            elif event_at >= state.lock_timeline_at:
+                if state.lock_timeline_active:
+                    state.lock_duration_sec += (
+                        event_at - state.lock_timeline_at
+                    ).total_seconds()
+                state.lock_timeline_at = event_at
+                state.lock_timeline_active = is_locked
+
             state.seen_stream = True
             if bid0 is not None:
                 state.sim_high = max(state.sim_high, bid0)
@@ -546,10 +566,7 @@ class Detector:
                 ):
                     state.anomaly_final_bid0_at = event_at
                     state.anomaly_final_bid0_volume = bid0_volume
-            if (
-                state.limit_up is not None
-                and _same_price(bid0, state.limit_up)
-            ):
+            if is_locked:
                 if not state.locked:
                     state.locked = True
                     state.first_lock = event_at
@@ -895,14 +912,7 @@ class Detector:
         )
 
     def _public_stock(self, state: _StockState) -> dict[str, Any]:
-        lock_duration_sec = (
-            round(
-                (state.last_lock - state.first_lock).total_seconds(),
-                3,
-            )
-            if state.first_lock is not None and state.last_lock is not None
-            else 0.0
-        )
+        lock_duration_sec = round(state.lock_duration_sec, 3)
         return {
             "code": state.code,
             "name": state.name,
