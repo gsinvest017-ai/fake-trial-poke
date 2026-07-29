@@ -24,6 +24,7 @@ import sys
 import threading
 import time
 from datetime import date, datetime, time as datetime_time, timedelta
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Iterable
 from zoneinfo import ZoneInfo
@@ -49,6 +50,7 @@ SUBSCRIBE_EVENT_GRACE_SECONDS = 0.01
 LOGIN_RETRY_SECONDS = 30.0
 DEFAULT_STALE_AFTER_SECONDS = 10.0
 TELEGRAM_NOTIFY_DEADLINE_SECONDS = 60.0
+TODAY_RECORDING_SUCCESS_THRESHOLD = 100
 
 
 def _default_port() -> int:
@@ -137,6 +139,153 @@ def paired_postopen_path(record_path: Path) -> Path:
     )
 
 
+@lru_cache(maxsize=64)
+def _count_landed_events(
+    path_text: str,
+    file_size: int,
+    modified_ns: int,
+) -> int:
+    """依檔案指紋快取非空行數，避免每次發布都重掃歷史主檔。"""
+    del file_size, modified_ns
+    try:
+        with Path(path_text).open("rb") as handle:
+            return sum(1 for line in handle if line.strip())
+    except OSError:
+        return 0
+
+
+def landed_event_count(path: Path) -> int:
+    """回傳目前已實際落地的非空 JSONL 行數。"""
+    try:
+        stat = path.stat()
+    except OSError:
+        return 0
+    if not path.is_file():
+        return 0
+    return _count_landed_events(
+        str(path.resolve()),
+        stat.st_size,
+        stat.st_mtime_ns,
+    )
+
+
+def window_clock(
+    value: Any,
+    fallback: datetime_time,
+) -> datetime_time:
+    """接受 HH:MM 或 ISO datetime，正規化成台北窗口時刻。"""
+    parsed = parse_iso(value)
+    if parsed is not None:
+        return parsed.timetz().replace(tzinfo=None)
+    try:
+        return datetime.strptime(str(value), "%H:%M").time()
+    except (TypeError, ValueError):
+        return fallback
+
+
+def classify_today_recording_state(
+    *,
+    now: datetime,
+    start_clock: datetime_time,
+    end_clock: datetime_time,
+    has_data: bool,
+    record_count: int,
+    service_status: str,
+    recording: bool,
+) -> str:
+    """依交易日、窗口與落地筆數分類今日錄製結果。"""
+    if now.tzinfo is None:
+        current = now.replace(tzinfo=TAIPEI)
+    else:
+        current = now.astimezone(TAIPEI)
+    if current.weekday() >= 5:
+        return "waiting"
+
+    start_at, end_at = window_on(
+        current.date(),
+        start_clock,
+        end_clock,
+    )
+    if current < start_at:
+        return "waiting"
+    if (
+        start_at <= current < end_at
+        and service_status == "live"
+        and recording
+    ):
+        return "recording"
+    if current >= end_at:
+        if (
+            has_data
+            and record_count > TODAY_RECORDING_SUCCESS_THRESHOLD
+        ):
+            return "success"
+        return "missed"
+
+    # 窗口仍在進行但尚未開始錄製，保留等待態直到窗口收口。
+    return "waiting"
+
+
+def build_today_recording(
+    *,
+    now: datetime,
+    window_start: Any,
+    window_end: Any,
+    service_status: str,
+    recording: bool,
+    active_record_path: Path | None = None,
+    active_record_count: int | None = None,
+) -> dict[str, Any]:
+    """建立可由落地檔案重建、不依賴程序存活期的今日錄製摘要。"""
+    if now.tzinfo is None:
+        current = now.replace(tzinfo=TAIPEI)
+    else:
+        current = now.astimezone(TAIPEI)
+    start_clock = window_clock(window_start, datetime_time(8, 30))
+    end_clock = window_clock(window_end, datetime_time(9, 0))
+    date_key = current.strftime("%Y%m%d")
+    main_path = HISTORY_DIR / date_key / f"auction_{date_key}.jsonl"
+    resolved_active_path = (
+        active_record_path.resolve()
+        if active_record_path is not None
+        else None
+    )
+    active_main = (
+        resolved_active_path is not None
+        and resolved_active_path == main_path.resolve()
+        and active_record_count is not None
+    )
+
+    if active_main:
+        landed_count = max(0, safe_int(active_record_count))
+        has_data = main_path.is_file() and landed_count > 0
+    else:
+        landed_count = landed_event_count(main_path)
+        has_data = landed_count > 0
+
+    # 自訂輸出路徑不改變 has_data 的定義；但 live 期間仍揭露執行中計數。
+    record_count = landed_count
+    if recording and active_record_count is not None and not has_data:
+        record_count = max(record_count, safe_int(active_record_count))
+
+    return {
+        "date": date_key,
+        "window": f"{start_clock:%H:%M}–{end_clock:%H:%M}",
+        "record_count": record_count,
+        "has_data": has_data,
+        "state": classify_today_recording_state(
+            now=current,
+            start_clock=start_clock,
+            end_clock=end_clock,
+            has_data=has_data,
+            record_count=record_count,
+            service_status=service_status,
+            recording=recording,
+        ),
+        "is_trading_day": current.weekday() < 5,
+    }
+
+
 def safe_int(value: Any, default: int = 0) -> int:
     try:
         return int(value)
@@ -214,6 +363,13 @@ def empty_state(
     next_window_at: str | None,
     auto_record_enabled: bool = True,
 ) -> dict[str, Any]:
+    today_recording = build_today_recording(
+        now=taipei_now(),
+        window_start=window_start,
+        window_end=window_end,
+        service_status=status,
+        recording=False,
+    )
     return {
         "service_status": status,
         "session": session,
@@ -226,6 +382,7 @@ def empty_state(
         "recording": False,
         "record_path": None,
         "record_count": 0,
+        "today_recording": today_recording,
         "last_event_age_sec": None,
         "login_ok": False,
         "subscribe_ok": False,
@@ -540,6 +697,7 @@ class ServiceRuntime:
         self._record_writer: ServiceJsonlWriter | None = None
         self._record_path: Path | None = None
         self._record_count = 0
+        self._record_base_count = 0
         self._aux_record_writer: ServiceJsonlWriter | None = None
         self._aux_record_path: Path | None = None
         self._record_error: BaseException | None = None
@@ -631,6 +789,7 @@ class ServiceRuntime:
         append: bool = False,
     ) -> None:
         resolved_path = relative_path(path)
+        base_count = landed_event_count(resolved_path) if append else 0
         writer = ServiceJsonlWriter(resolved_path, append=append)
         writer.start()
         with self._lock:
@@ -640,6 +799,7 @@ class ServiceRuntime:
             self._record_writer = writer
             self._record_path = resolved_path
             self._record_count = 0
+            self._record_base_count = base_count
             self._record_error = None
 
     def finish_recording(
@@ -787,6 +947,22 @@ class ServiceRuntime:
                     "login_ok": self._login_ok,
                     "subscribe_ok": self._subscribe_ok,
                 }
+            )
+            active_record_count = (
+                self._record_base_count + self._record_writer.count
+                if self._record_writer is not None
+                else self._aux_record_writer.count
+                if self._aux_record_writer is not None
+                else None
+            )
+            state["today_recording"] = build_today_recording(
+                now=parse_iso(now_value) or wall_now,
+                window_start=state.get("window", {}).get("start"),
+                window_end=state.get("window", {}).get("end"),
+                service_status=service_status,
+                recording=state["recording"],
+                active_record_path=active_record_path,
+                active_record_count=active_record_count,
             )
         self.shared.replace(state)
         return state

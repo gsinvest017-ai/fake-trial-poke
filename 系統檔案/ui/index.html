@@ -436,16 +436,24 @@
       white-space: nowrap;
     }
 
-    .record-state.on {
+    .record-state.on,
+    .record-state.success {
       border-color: rgba(47, 125, 91, 0.3);
       background: var(--touched-soft);
       color: var(--touched);
     }
 
-    .record-state.recording {
+    .record-state.recording,
+    .record-state.missed {
       border-color: rgba(200, 50, 42, 0.3);
       background: var(--fake-soft);
       color: var(--fake);
+    }
+
+    .record-state.waiting {
+      border-color: var(--line-strong);
+      background: var(--watching-soft);
+      color: #5F594F;
     }
 
     .auto-record-toggle {
@@ -1636,7 +1644,7 @@
         <h2 class="record-control-title" id="record-control-title">錄製控制</h2>
         <div class="record-control-states" aria-live="polite">
           <span class="record-state" id="auto-record-state">明天自動錄製：讀取中</span>
-          <span class="record-state" id="today-record-state">今日錄製：讀取中</span>
+          <span class="record-state" id="today-record-state">今日錄製結果：讀取中</span>
         </div>
       </div>
       <label class="auto-record-toggle" for="auto-record-switch">
@@ -2411,16 +2419,37 @@
         const recordingKnown = hasState && typeof state.recording === "boolean";
         const autoEnabled = autoKnown && state.auto_record_enabled === true;
         const recording = recordingKnown && state.recording === true;
+        const todayRecording = hasState
+          && state.today_recording
+          && typeof state.today_recording === "object"
+          ? state.today_recording
+          : null;
+        const todayState = todayRecording
+          && ["success", "recording", "waiting", "missed"].includes(todayRecording.state)
+          ? todayRecording.state
+          : "";
+        const todayCount = todayRecording
+          ? Math.max(0, Math.trunc(finiteNumber(todayRecording.record_count) || 0))
+          : 0;
+        const todayWindow = safeText(todayRecording && todayRecording.window, "08:30–09:00");
 
         elements.autoRecordState.textContent = autoKnown
           ? `明天自動錄製：${autoEnabled ? "開" : "關"}`
           : "明天自動錄製：狀態未知";
         elements.autoRecordState.className = `record-state${autoEnabled ? " on" : ""}`;
-        elements.todayRecordState.textContent = recordingKnown
-          ? `今日錄製：${recording ? "錄製中" : "已停止"}`
-          : "今日錄製：狀態未知";
+        const todayMessages = {
+          success: `✅ 今日已錄製 ${todayCount} 筆（${todayWindow} 完成）`,
+          recording: `🔴 錄製中 ${todayCount} 筆`,
+          waiting: todayRecording && todayRecording.is_trading_day === false
+            ? "⏳ 等待下一交易日"
+            : `⏳ 等待今日 ${todayWindow} 窗口`,
+          missed: "❌ 今日窗口已過、未錄到（請檢查）"
+        };
+        elements.todayRecordState.textContent = todayState
+          ? todayMessages[todayState]
+          : "今日錄製結果：狀態未知";
         elements.todayRecordState.className =
-          `record-state${recording ? " recording" : ""}`;
+          `record-state${todayState ? ` ${todayState}` : ""}`;
 
         elements.autoRecordSwitch.checked = autoEnabled;
         elements.autoRecordSwitch.disabled = controlBusy || !autoKnown;
@@ -2631,7 +2660,7 @@
         postRecordControl(
           { action: "stop" },
           "正在停止今日錄製…",
-          "今日錄製已停止。"
+          "今日錄製停止指令已完成。"
         );
       });
 

@@ -10,7 +10,7 @@ import threading
 import types
 import unittest
 import urllib.request
-from datetime import timedelta
+from datetime import datetime, time as datetime_time, timedelta
 from types import SimpleNamespace
 from unittest import mock
 
@@ -33,6 +33,14 @@ STATE_CONTRACT_FIELDS = {
     "last_event_age_sec",
     "login_ok",
     "subscribe_ok",
+    "today_recording",
+}
+TODAY_RECORDING_FIELDS = {
+    "date",
+    "window",
+    "record_count",
+    "has_data",
+    "state",
 }
 
 
@@ -114,6 +122,151 @@ def synthetic_events(now: object) -> list[dict[str, object]]:
 
 
 class ServiceRecordTests(unittest.TestCase):
+    def test_today_recording_state_classification(self) -> None:
+        start_clock = datetime_time(8, 30)
+        end_clock = datetime_time(9, 0)
+        cases = [
+            (
+                "weekday_before_window",
+                datetime(2026, 7, 28, 8, 0, tzinfo=service.TAIPEI),
+                False,
+                0,
+                "idle",
+                False,
+                "waiting",
+            ),
+            (
+                "live_recording",
+                datetime(2026, 7, 28, 8, 45, tzinfo=service.TAIPEI),
+                False,
+                42,
+                "live",
+                True,
+                "recording",
+            ),
+            (
+                "window_open_not_recording",
+                datetime(2026, 7, 28, 8, 45, tzinfo=service.TAIPEI),
+                False,
+                0,
+                "idle",
+                False,
+                "waiting",
+            ),
+            (
+                "completed_with_data",
+                datetime(2026, 7, 28, 9, 1, tzinfo=service.TAIPEI),
+                True,
+                101,
+                "closed",
+                False,
+                "success",
+            ),
+            (
+                "completed_without_data",
+                datetime(2026, 7, 28, 9, 1, tzinfo=service.TAIPEI),
+                False,
+                0,
+                "closed",
+                False,
+                "missed",
+            ),
+            (
+                "completed_below_threshold",
+                datetime(2026, 7, 28, 9, 1, tzinfo=service.TAIPEI),
+                True,
+                100,
+                "closed",
+                False,
+                "missed",
+            ),
+            (
+                "weekend",
+                datetime(2026, 8, 1, 10, 0, tzinfo=service.TAIPEI),
+                False,
+                0,
+                "closed",
+                False,
+                "waiting",
+            ),
+        ]
+
+        for (
+            label,
+            now,
+            has_data,
+            record_count,
+            service_status,
+            recording,
+            expected,
+        ) in cases:
+            with self.subTest(label=label):
+                actual = service.classify_today_recording_state(
+                    now=now,
+                    start_clock=start_clock,
+                    end_clock=end_clock,
+                    has_data=has_data,
+                    record_count=record_count,
+                    service_status=service_status,
+                    recording=recording,
+                )
+                self.assertEqual(actual, expected)
+
+    def test_today_recording_rebuilds_from_landed_main_file(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            history_dir = pathlib.Path(temp_dir) / "history"
+            record_dir = history_dir / "20260728"
+            record_dir.mkdir(parents=True)
+            record_path = record_dir / "auction_20260728.jsonl"
+            record_path.write_text(
+                "\n".join("{}" for _ in range(101)) + "\n",
+                encoding="utf-8",
+            )
+
+            with mock.patch.object(service, "HISTORY_DIR", history_dir):
+                result = service.build_today_recording(
+                    now=datetime(
+                        2026,
+                        7,
+                        28,
+                        9,
+                        1,
+                        tzinfo=service.TAIPEI,
+                    ),
+                    window_start="08:30",
+                    window_end="09:00",
+                    service_status="replay",
+                    recording=False,
+                )
+                missing_result = service.build_today_recording(
+                    now=datetime(
+                        2026,
+                        7,
+                        30,
+                        9,
+                        1,
+                        tzinfo=service.TAIPEI,
+                    ),
+                    window_start="08:30",
+                    window_end="09:00",
+                    service_status="closed",
+                    recording=False,
+                )
+
+            self.assertTrue(
+                TODAY_RECORDING_FIELDS.issubset(result),
+                sorted(TODAY_RECORDING_FIELDS - set(result)),
+            )
+            self.assertEqual(result["date"], "20260728")
+            self.assertEqual(result["window"], "08:30–09:00")
+            self.assertEqual(result["record_count"], 101)
+            self.assertTrue(result["has_data"])
+            self.assertEqual(result["state"], "success")
+            self.assertEqual(missing_result["date"], "20260730")
+            self.assertEqual(missing_result["record_count"], 0)
+            self.assertFalse(missing_result["has_data"])
+            self.assertEqual(missing_result["state"], "missed")
+
     def test_default_storage_paths_are_partitioned_by_date(self) -> None:
         recording_at = service.taipei_now().replace(
             year=2026,
@@ -965,6 +1118,13 @@ class ServiceRecordTests(unittest.TestCase):
         self.assertTrue(
             STATE_CONTRACT_FIELDS.issubset(api_state),
             sorted(STATE_CONTRACT_FIELDS - set(api_state)),
+        )
+        self.assertTrue(
+            TODAY_RECORDING_FIELDS.issubset(api_state["today_recording"]),
+            sorted(
+                TODAY_RECORDING_FIELDS
+                - set(api_state["today_recording"])
+            ),
         )
         self.assertTrue(api_state["login_ok"])
         self.assertTrue(api_state["subscribe_ok"])
