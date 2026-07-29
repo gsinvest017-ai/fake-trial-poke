@@ -19,6 +19,8 @@ from datetime import date, datetime, time as clock_time, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+import control_state
+
 
 BASE_DIR = Path(__file__).resolve().parent
 SERVICE_PATH = BASE_DIR / "service.py"
@@ -198,6 +200,17 @@ def wait_until_listening(process: subprocess.Popen[bytes]) -> bool:
 
 
 def ensure_service() -> int:
+    try:
+        auto_record_enabled = control_state.get_auto_record_enabled()
+    except control_state.ControlStateError:
+        LOGGER.exception(
+            "錄製控制狀態無法讀取；基於安全考量不啟動 service.py"
+        )
+        return 1
+    if not auto_record_enabled:
+        LOGGER.info("明日自動錄製已關閉；今日不啟動 service.py")
+        return 0
+
     if service_is_listening():
         LOGGER.info(
             "PORT %s 已在監聽，服務已啟動；跳過",

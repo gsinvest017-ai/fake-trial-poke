@@ -129,7 +129,7 @@ class DetectorTests(unittest.TestCase):
         )
         self.assertEqual(result["lock_duration_sec"], 5.0)
 
-    def test_lock_duration_accumulates_only_locked_intervals(self) -> None:
+    def test_lock_duration_matches_scanner_first_to_last_lock(self) -> None:
         detector = self.make_detector(
             {"code": "DURATION", "name": "累計時長", "limit_up": 100.0}
         )
@@ -152,7 +152,8 @@ class DetectorTests(unittest.TestCase):
         detector.process_events(events)
 
         result = stock(detector, "DURATION")
-        self.assertEqual(result["lock_duration_sec"], 90.0)
+        # scanner.py 以所有鎖定 BidAsk 的 first/last 相減，包含中途解鎖區段。
+        self.assertEqual(result["lock_duration_sec"], 210.0)
         self.assertTrue(
             str(result["first_lock_time"]).startswith(
                 "2026-07-24T08:30:00"
@@ -176,7 +177,7 @@ class DetectorTests(unittest.TestCase):
         )
         self.assertEqual(
             stock(detector, "DURATION")["lock_duration_sec"],
-            90.0,
+            210.0,
         )
 
     def test_open_zero_is_unknown_and_snapshot_quote_means_held(self) -> None:
@@ -434,8 +435,14 @@ class DetectorTests(unittest.TestCase):
         self.assertEqual(result["bid0_max_price"], 110.0)
         self.assertEqual(result["bid0_swing_pct"], 11.0)
         self.assertEqual(result["reference_open_gap_pct"], 4.0)
+        self.assertEqual(result["open_gap_ref_pct"], 4.0)
         self.assertEqual(result["open_gap_direction"], "up")
+        self.assertEqual(result["grade"], "T2")
+        self.assertEqual(result["grade_label"], "中量")
         self.assertEqual(detector.get_state()["counts"]["anomaly"], 1)
+        self.assertFalse(
+            detector.get_state()["fake_grade_thresholds"]["calibrated"]
+        )
 
     def test_anomaly_boundaries_and_zero_bid_price_handling(self) -> None:
         detector = self.make_detector(
@@ -502,8 +509,59 @@ class DetectorTests(unittest.TestCase):
         result = stock(detector, "TICKOPEN")
         # 既有狀態仍可使用 opening tick，但新跳空維度只接受 snapshot open。
         self.assertEqual(result["open_price"], 104.0)
+        self.assertEqual(result["open_gap_ref_pct"], 4.0)
         self.assertIsNone(result["reference_open_gap_pct"])
         self.assertNotIn(ANOM_OPEN_GAP, result["anomalies"])
+
+    def test_fake_grade_boundaries_and_state_date(self) -> None:
+        metadata = {
+            "date": "20260728",
+            "stocks": [
+                {
+                    "code": code,
+                    "name": code,
+                    "reference": 90.0,
+                    "limit_up": 100.0,
+                }
+                for code in ("T1", "T2", "T3", "T4")
+            ],
+        }
+        detector = Detector(
+            stocks=metadata,
+            window_start="08:30",
+            window_end="09:00",
+        )
+        for code, volume in (
+            ("T1", 500),
+            ("T2", 200),
+            ("T3", 100),
+            ("T4", 99),
+        ):
+            detector.process_event(
+                bidask(code, "2026-07-28T08:59:50", 100.0, volume)
+            )
+            detector.process_event(
+                snapshot(
+                    code,
+                    "2026-07-28T09:00:03",
+                    90.0,
+                    90.0,
+                    volume,
+                )
+            )
+
+        state = detector.build_state(
+            "replay",
+            now="2026-07-28T09:00:03",
+        )
+        by_code = {item["code"]: item for item in state["stocks"]}
+        self.assertEqual(state["date"], "2026-07-28")
+        self.assertEqual(
+            {code: by_code[code]["grade"] for code in by_code},
+            {"T1": "T1", "T2": "T2", "T3": "T3", "T4": "T4"},
+        )
+        for item in by_code.values():
+            self.assertEqual(item["open_gap_ref_pct"], 0.0)
 
 
 if __name__ == "__main__":

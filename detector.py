@@ -69,6 +69,24 @@ ANOMALY_THRESHOLDS = {
     "calibrated": False,
 }
 
+# 疑似假試撮買一堆量分級；目前僅供排序與視覺提示，尚未校準。
+FAKE_GRADE_T1_MIN_LOTS = 500
+FAKE_GRADE_T2_MIN_LOTS = 200
+FAKE_GRADE_T3_MIN_LOTS = 100
+FAKE_GRADE_LABELS = {
+    "T1": "大單",
+    "T2": "中量",
+    "T3": "邊緣",
+    "T4": "薄量",
+}
+FAKE_GRADE_THRESHOLDS = {
+    "t1_min_lots": FAKE_GRADE_T1_MIN_LOTS,
+    "t2_min_lots": FAKE_GRADE_T2_MIN_LOTS,
+    "t3_min_lots": FAKE_GRADE_T3_MIN_LOTS,
+    "unit": "lots",
+    "calibrated": False,
+}
+
 STATUS_LABELS = {
     "suspected_fake": "疑似假試撮",
     "locked_held": "鎖漲停守住",
@@ -164,6 +182,26 @@ def _iso_seconds(value: datetime | None) -> str | None:
     return value.isoformat(timespec="seconds") if value is not None else None
 
 
+def _normalize_date(value: Any) -> str | None:
+    text = str(value or "").strip()
+    if len(text) == 8 and text.isdigit():
+        return f"{text[:4]}-{text[4:6]}-{text[6:]}"
+    try:
+        return datetime.strptime(text, "%Y-%m-%d").date().isoformat()
+    except ValueError:
+        return None
+
+
+def _fake_grade(max_bid0_volume: int) -> str:
+    if max_bid0_volume >= FAKE_GRADE_T1_MIN_LOTS:
+        return "T1"
+    if max_bid0_volume >= FAKE_GRADE_T2_MIN_LOTS:
+        return "T2"
+    if max_bid0_volume >= FAKE_GRADE_T3_MIN_LOTS:
+        return "T3"
+    return "T4"
+
+
 @dataclass
 class _StockState:
     code: str
@@ -179,8 +217,6 @@ class _StockState:
     first_lock: datetime | None = None
     last_lock: datetime | None = None
     lock_duration_sec: float = 0.0
-    lock_timeline_at: datetime | None = None
-    lock_timeline_active: bool = False
     sim_high: float = 0.0
     bid0_price: float | None = None
     bid0_volume: int | None = None
@@ -199,6 +235,7 @@ class _StockState:
     opening_tick_at: datetime | None = None
     open_price: float | None = None
     open_gap_pct: float | None = None
+    open_gap_ref_pct: float | None = None
     bid0_withdraw_pct: float | None = None
     bid0_swing_pct: float | None = None
     reference_open_gap_pct: float | None = None
@@ -261,6 +298,7 @@ class Detector:
         self._alerts: deque[dict[str, Any]] = deque(maxlen=alerts_limit)
         self._legacy_snapshot_at: datetime | None = None
         self._legacy_snapshot_count = 0
+        self._date: str | None = None
         self._universe_size: int | None = None
         self._subscribed_count: int | None = None
         # 完整 recorder meta 有 subscribed_codes 時，snapshot 仍可能含整個
@@ -286,6 +324,7 @@ class Detector:
         return spec.strftime("%H:%M")
 
     def _set_metadata_window(self, metadata: Mapping[str, Any]) -> None:
+        self._date = _normalize_date(metadata.get("date")) or self._date
         raw_session = metadata.get("session")
         if raw_session in {"preopen", "preclose"}:
             self.session = str(raw_session)
@@ -528,19 +567,6 @@ class Detector:
                 state.limit_up is not None
                 and _same_price(bid0, state.limit_up)
             )
-            # 只由窗口內試撮 BidAsk 建立鎖定時間線。相鄰事件區間沿用
-            # 前一事件狀態；過期事件與 snapshot/tick 不回寫或外推秒數。
-            if state.lock_timeline_at is None:
-                state.lock_timeline_at = event_at
-                state.lock_timeline_active = is_locked
-            elif event_at >= state.lock_timeline_at:
-                if state.lock_timeline_active:
-                    state.lock_duration_sec += (
-                        event_at - state.lock_timeline_at
-                    ).total_seconds()
-                state.lock_timeline_at = event_at
-                state.lock_timeline_active = is_locked
-
             state.seen_stream = True
             if bid0 is not None:
                 state.sim_high = max(state.sim_high, bid0)
@@ -569,13 +595,22 @@ class Detector:
             if is_locked:
                 if not state.locked:
                     state.locked = True
-                    state.first_lock = event_at
                     self._push_alert(state, "locked", event_at)
-                if (
-                    state.last_lock is None
-                    or event_at >= state.last_lock
-                ):
-                    state.last_lock = event_at
+                # 與 scanner.py 一致：鎖秒為窗口內 bid0==limit_up
+                # 事件的首末時間差，不外推到下一筆非鎖定報價。
+                state.first_lock = (
+                    event_at
+                    if state.first_lock is None
+                    else min(state.first_lock, event_at)
+                )
+                state.last_lock = (
+                    event_at
+                    if state.last_lock is None
+                    else max(state.last_lock, event_at)
+                )
+                state.lock_duration_sec = (
+                    state.last_lock - state.first_lock
+                ).total_seconds()
 
         lookback_start = window_end - timedelta(
             seconds=self.drop_lookback_seconds
@@ -834,6 +869,18 @@ class Detector:
             )
             else None
         )
+        state.open_gap_ref_pct = (
+            round(
+                (state.open_price / state.reference - 1.0) * 100.0,
+                4,
+            )
+            if (
+                state.open_price is not None
+                and state.reference is not None
+                and state.reference > 0
+            )
+            else None
+        )
         state.bid0_dropped = self._drop_evidence(state, snapshot)
         self._recompute_anomalies(state)
 
@@ -913,6 +960,11 @@ class Detector:
 
     def _public_stock(self, state: _StockState) -> dict[str, Any]:
         lock_duration_sec = round(state.lock_duration_sec, 3)
+        grade = (
+            _fake_grade(state.bid0_peak_volume)
+            if state.status == "suspected_fake"
+            else None
+        )
         return {
             "code": state.code,
             "name": state.name,
@@ -931,6 +983,9 @@ class Detector:
             "lock_duration_sec": lock_duration_sec,
             "open_price": state.open_price,
             "open_gap_pct": state.open_gap_pct,
+            "open_gap_ref_pct": state.open_gap_ref_pct,
+            "grade": grade,
+            "grade_label": FAKE_GRADE_LABELS.get(grade),
             "bid0_dropped": state.bid0_dropped,
             "anomalies": list(state.anomalies),
             "anomaly_score": state.anomaly_score,
@@ -972,6 +1027,7 @@ class Detector:
             "stocks": stocks,
             "alerts": [dict(alert) for alert in self._alerts],
             "anomaly_thresholds": dict(ANOMALY_THRESHOLDS),
+            "fake_grade_thresholds": dict(FAKE_GRADE_THRESHOLDS),
         }
 
     snapshot = get_state
@@ -1003,6 +1059,7 @@ class Detector:
             raise ValueError("next_window_at 必須是合法 datetime/ISO")
         detector_state = self.get_state()
         return {
+            "date": self._date or parsed_now.date().isoformat(),
             "service_status": service_status,
             "session": self.session,
             "window": {
@@ -1042,6 +1099,11 @@ __all__ = [
     "ANOM_SWING_PCT",
     "AuctionDetector",
     "Detector",
+    "FAKE_GRADE_LABELS",
+    "FAKE_GRADE_THRESHOLDS",
+    "FAKE_GRADE_T1_MIN_LOTS",
+    "FAKE_GRADE_T2_MIN_LOTS",
+    "FAKE_GRADE_T3_MIN_LOTS",
     "OPEN_GAP_TOLERANCE_PCT",
     "SNAPSHOT_LIMIT_TOLERANCE_RATIO",
     "STATUS_LABELS",

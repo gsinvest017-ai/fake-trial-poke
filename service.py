@@ -28,6 +28,8 @@ from pathlib import Path
 from typing import Any, Iterable
 from zoneinfo import ZoneInfo
 
+import control_state
+
 
 # 必須在匯入 Shioaji 前降低第三方套件輸出敏感連線資訊的風險。
 os.environ.setdefault("LOGURU_LEVEL", "ERROR")
@@ -210,6 +212,7 @@ def empty_state(
     window_start: str,
     window_end: str,
     next_window_at: str | None,
+    auto_record_enabled: bool = True,
 ) -> dict[str, Any]:
     return {
         "service_status": status,
@@ -219,6 +222,7 @@ def empty_state(
         "next_window_at": next_window_at,
         "universe": 0,
         "subscribed": 0,
+        "auto_record_enabled": auto_record_enabled,
         "recording": False,
         "record_path": None,
         "record_count": 0,
@@ -367,6 +371,9 @@ def write_detector_result(
         "anomaly_thresholds": copy.deepcopy(
             state.get("anomaly_thresholds", {})
         ),
+        "fake_grade_thresholds": copy.deepcopy(
+            state.get("fake_grade_thresholds", {})
+        ),
     }
     resolved_path = relative_path(result_path)
     resolved_path.parent.mkdir(parents=True, exist_ok=True)
@@ -509,6 +516,7 @@ class ServiceRuntime:
         stale_after_seconds: float = DEFAULT_STALE_AFTER_SECONDS,
         record_path: Path | None = None,
         record_append: bool = False,
+        auto_record_enabled: bool = True,
     ) -> None:
         from detector import AuctionDetector
 
@@ -526,6 +534,7 @@ class ServiceRuntime:
         self._subscribed = 0
         self._login_ok = False
         self._subscribe_ok = False
+        self._auto_record_enabled = bool(auto_record_enabled)
         self._last_event_ts: datetime | None = None
         self._stale_after_seconds = stale_after_seconds
         self._record_writer: ServiceJsonlWriter | None = None
@@ -541,6 +550,7 @@ class ServiceRuntime:
                 window_start=window_start,
                 window_end=window_end,
                 next_window_at=None,
+                auto_record_enabled=self._auto_record_enabled,
             )
         )
         if record_path is not None:
@@ -609,6 +619,10 @@ class ServiceRuntime:
                     self._last_event_ts = parsed_last_event
                 else:
                     self._last_event_ts = parse_iso(last_event_ts)
+
+    def set_auto_record_enabled(self, enabled: bool) -> None:
+        with self._lock:
+            self._auto_record_enabled = bool(enabled)
 
     def start_recording(
         self,
@@ -760,6 +774,7 @@ class ServiceRuntime:
             state.update(
                 {
                     "recording": bool(writer is not None and writer.active),
+                    "auto_record_enabled": self._auto_record_enabled,
                     "record_path": (
                         str(active_record_path)
                         if active_record_path is not None
@@ -791,6 +806,243 @@ def publish_loop(runtime: ServiceRuntime, stop_event: threading.Event) -> None:
                 )
                 last_error_at = current
         stop_event.wait(PUBLISH_INTERVAL_SECONDS)
+
+
+class ControlActionError(RuntimeError):
+    """A valid control request that cannot be performed right now."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int = 409,
+        error_code: str = "control_rejected",
+    ) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.error_code = error_code
+
+
+class RecordingControl:
+    """Coordinate persistent policy and one cancellable source session."""
+
+    def __init__(
+        self,
+        runtime: ServiceRuntime,
+        *,
+        mode: str,
+        auto_record_enabled: bool,
+        session: str,
+        start_clock: datetime_time,
+        end_clock: datetime_time,
+    ) -> None:
+        if mode not in {"live", "replay"}:
+            raise ValueError("mode 必須是 live 或 replay")
+        self.runtime = runtime
+        self.mode = mode
+        self.session = session
+        self.start_clock = start_clock
+        self.end_clock = end_clock
+        self._lock = threading.RLock()
+        self._changed = threading.Event()
+        self._shutdown = False
+        self._auto_record_enabled = bool(auto_record_enabled)
+        self._decision_day = taipei_now().date()
+        self._day_enabled = self._auto_record_enabled
+        self._manual_day: date | None = None
+        self._manual_enabled: bool | None = None
+        self._replay_pending = mode == "replay"
+        self._active_stop: threading.Event | None = None
+        self._active_done: threading.Event | None = None
+
+    def _refresh_current_day_locked(self, today: date) -> None:
+        if self._decision_day == today:
+            return
+        self._decision_day = today
+        self._day_enabled = self._auto_record_enabled
+        if self._manual_day != today:
+            self._manual_day = None
+            self._manual_enabled = None
+
+    def should_run_live(self, target_day: date) -> bool:
+        with self._lock:
+            today = taipei_now().date()
+            self._refresh_current_day_locked(today)
+            if self._manual_day == target_day:
+                return bool(self._manual_enabled)
+            if target_day == today:
+                return self._day_enabled
+            return self._auto_record_enabled
+
+    def wait_for_change(
+        self,
+        service_stop_event: threading.Event,
+        timeout: float,
+    ) -> bool:
+        """Wait interruptibly; True means policy changed or service stopped."""
+        deadline = time.monotonic() + max(0.0, timeout)
+        while not service_stop_event.is_set():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            if self._changed.wait(min(1.0, remaining)):
+                self._changed.clear()
+                return True
+        return True
+
+    def _begin_session_locked(self) -> threading.Event:
+        stop_event = threading.Event()
+        self._active_stop = stop_event
+        self._active_done = threading.Event()
+        return stop_event
+
+    def begin_live_session(self, target_day: date) -> threading.Event | None:
+        with self._lock:
+            if (
+                self._shutdown
+                or self._active_stop is not None
+                or not self.should_run_live(target_day)
+            ):
+                return None
+            return self._begin_session_locked()
+
+    def begin_replay_session(self) -> threading.Event | None:
+        with self._lock:
+            if (
+                self._shutdown
+                or self._active_stop is not None
+                or not self._replay_pending
+            ):
+                return None
+            self._replay_pending = False
+            return self._begin_session_locked()
+
+    def end_session(self, stop_event: threading.Event) -> None:
+        with self._lock:
+            if self._active_stop is not stop_event:
+                return
+            done = self._active_done
+            self._active_stop = None
+            self._active_done = None
+            if done is not None:
+                done.set()
+            self._changed.set()
+
+    def shutdown(self) -> None:
+        with self._lock:
+            self._shutdown = True
+            self._replay_pending = False
+            active_stop = self._active_stop
+            if active_stop is not None:
+                active_stop.set()
+            self._changed.set()
+
+    def _set_auto(self, enabled: bool) -> dict[str, Any]:
+        written = control_state.set_auto_record_enabled(enabled)
+        with self._lock:
+            self._auto_record_enabled = bool(
+                written["auto_record_enabled"]
+            )
+            # 今天的決策已在啟動/換日時快照；set_auto 是「明天起」。
+            self._changed.set()
+        self.runtime.set_auto_record_enabled(enabled)
+        return self.runtime.publish()
+
+    def _stop(self) -> dict[str, Any]:
+        with self._lock:
+            today = taipei_now().date()
+            self._refresh_current_day_locked(today)
+            if self.mode == "live":
+                self._manual_day = today
+                self._manual_enabled = False
+            else:
+                self._replay_pending = False
+            active_stop = self._active_stop
+            active_done = self._active_done
+            if active_stop is not None:
+                active_stop.set()
+            self._changed.set()
+
+        if active_done is not None and not active_done.wait(timeout=20.0):
+            raise ControlActionError(
+                "錄製停止逾時；服務仍在安全收口，請稍後重試",
+                status_code=503,
+                error_code="stop_timeout",
+            )
+        self.runtime.set_context(
+            service_status="closed",
+            subscribed=0,
+            login_ok=False,
+            subscribe_ok=False,
+            last_event_ts=None,
+        )
+        return self.runtime.publish()
+
+    def _start(self) -> dict[str, Any]:
+        now = taipei_now()
+        with self._lock:
+            if self._shutdown:
+                raise ControlActionError(
+                    "服務正在停止",
+                    status_code=503,
+                    error_code="service_stopping",
+                )
+            if self._active_stop is not None:
+                return self.runtime.publish()
+            if self.mode == "replay":
+                self._replay_pending = True
+                self._changed.set()
+                self.runtime.set_context(service_status="replay")
+                return self.runtime.publish()
+
+            if now.weekday() >= 5:
+                raise ControlActionError("非交易日，無法開始今日錄製")
+            start_at, end_at = window_on(
+                now.date(),
+                self.start_clock,
+                self.end_clock,
+            )
+            earliest = start_at - timedelta(minutes=PREARM_MINUTES)
+            latest = end_at + timedelta(
+                seconds=SNAPSHOT_AFTER_END_SECONDS
+            )
+            if now < earliest or now > latest:
+                raise ControlActionError(
+                    "目前不在可立即開始的錄製時間窗"
+                    f"（{earliest:%H:%M}–{latest:%H:%M:%S}）"
+                )
+            self._manual_day = now.date()
+            self._manual_enabled = True
+            self._changed.set()
+        self.runtime.set_context(
+            service_status="idle",
+            next_window_at=iso_taipei(start_at),
+            now_override=None,
+        )
+        return self.runtime.publish()
+
+    def handle_request(
+        self,
+        action: str,
+        enabled: bool | None,
+    ) -> dict[str, Any]:
+        if action == "set_auto":
+            if type(enabled) is not bool:
+                raise ControlActionError(
+                    "enabled 必須是 boolean",
+                    status_code=400,
+                    error_code="invalid_enabled",
+                )
+            return self._set_auto(enabled)
+        if action == "stop":
+            return self._stop()
+        if action == "start":
+            return self._start()
+        raise ControlActionError(
+            "不支援的控制動作",
+            status_code=400,
+            error_code="invalid_action",
+        )
 
 
 def load_replay(
@@ -968,6 +1220,18 @@ def replay_worker(
         if isinstance(stock, dict)
         and str(stock.get("code")) in {"6488", "2481", "6147"}
     }
+    grade_evidence = {
+        str(stock.get("code")): {
+            "max_bid0_volume": stock.get("max_bid0_volume"),
+            "lock_duration_sec": stock.get("lock_duration_sec"),
+            "open_gap_pct": stock.get("open_gap_pct"),
+            "open_gap_ref_pct": stock.get("open_gap_ref_pct"),
+            "grade": stock.get("grade"),
+        }
+        for stock in stocks
+        if isinstance(stock, dict)
+        and str(stock.get("code")) in {"2303", "8039", "3653"}
+    }
     print(
         "replay 完成："
         f"事件={processed}；stocks={len(stocks)}；"
@@ -989,6 +1253,74 @@ def replay_worker(
         ),
         flush=True,
     )
+    print(
+        f"replay 分級佐證（日期={state.get('date')}）="
+        + json.dumps(
+            grade_evidence,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ),
+        flush=True,
+    )
+
+
+def replay_control_worker(
+    runtime: ServiceRuntime,
+    rows: list[tuple[datetime, dict[str, Any]]],
+    metadata: dict[str, Any],
+    *,
+    speed: float,
+    service_stop_event: threading.Event,
+    control: RecordingControl,
+    record_out: Path | None = None,
+    result_path: Path | None = None,
+) -> None:
+    """Run/restart replay sessions without taking down the local HTTP UI."""
+    session, window_start, window_end, universe, subscribed = (
+        infer_replay_context(metadata, rows)
+    )
+    while not service_stop_event.is_set():
+        session_stop = control.begin_replay_session()
+        if session_stop is None:
+            control.wait_for_change(service_stop_event, 60.0)
+            continue
+        try:
+            runtime.reset_detector(
+                metadata,
+                session=session,
+                window_start=window_start,
+                window_end=window_end,
+                universe=universe,
+                subscribed=subscribed,
+            )
+            runtime.set_context(
+                service_status="replay",
+                next_window_at=None,
+                now_override=iso_taipei(rows[0][0]) if rows else None,
+                login_ok=False,
+                subscribe_ok=False,
+                last_event_ts=None,
+            )
+            if record_out is not None:
+                runtime.start_recording(record_out)
+            replay_worker(
+                runtime,
+                rows,
+                speed=speed,
+                stop_event=session_stop,
+                record_metadata=(
+                    metadata if record_out is not None else None
+                ),
+                result_path=result_path,
+            )
+        except Exception as exc:
+            runtime.set_context(service_status="error")
+            print(
+                f"replay 執行 FAILED（{type(exc).__name__}）",
+                flush=True,
+            )
+        finally:
+            control.end_session(session_stop)
 
 
 class LiveSourceError(RuntimeError):
@@ -1599,6 +1931,7 @@ def live_worker(
     record_enabled: bool,
     record_out: Path | None,
     result_out: Path | None = None,
+    control: RecordingControl | None = None,
 ) -> None:
     completed_a_window = False
     while not stop_event.is_set():
@@ -1608,6 +1941,24 @@ def live_worker(
             start_clock,
             end_clock,
         )
+        if (
+            control is not None
+            and not control.should_run_live(start_at.date())
+        ):
+            runtime.set_context(
+                service_status=(
+                    "closed" if completed_a_window else "idle"
+                ),
+                next_window_at=iso_taipei(start_at),
+                now_override=None,
+                subscribed=0,
+                login_ok=False,
+                subscribe_ok=False,
+                last_event_ts=None,
+            )
+            runtime.publish()
+            control.wait_for_change(stop_event, 30.0)
+            continue
         prearm_at = start_at - timedelta(minutes=PREARM_MINUTES)
         if now < prearm_at:
             runtime.set_context(
@@ -1617,13 +1968,21 @@ def live_worker(
                 next_window_at=iso_taipei(start_at),
                 now_override=None,
             )
-            if stop_wait(
-                stop_event,
-                (prearm_at - now).total_seconds(),
-            ):
+            wait_seconds = (prearm_at - now).total_seconds()
+            if control is not None:
+                if control.wait_for_change(stop_event, wait_seconds):
+                    continue
+            elif stop_wait(stop_event, wait_seconds):
                 return
 
         while not stop_event.is_set():
+            session_stop = (
+                control.begin_live_session(start_at.date())
+                if control is not None
+                else stop_event
+            )
+            if session_stop is None:
+                break
             try:
                 runtime.set_context(
                     login_ok=False,
@@ -1636,13 +1995,17 @@ def live_worker(
                     start_at=start_at,
                     end_at=end_at,
                     universe_spec=universe_spec,
-                    stop_event=stop_event,
+                    stop_event=session_stop,
                     record_enabled=record_enabled,
                     record_out=record_out,
                     result_out=result_out,
                 )
+                if control is not None:
+                    control.end_session(session_stop)
                 break
             except LiveSourceError as exc:
+                if control is not None:
+                    control.end_session(session_stop)
                 print(str(exc), flush=True)
                 runtime.set_context(
                     service_status="error",
@@ -1654,8 +2017,18 @@ def live_worker(
                     + timedelta(seconds=SNAPSHOT_AFTER_END_SECONDS)
                 ):
                     break
-                if stop_wait(stop_event, LOGIN_RETRY_SECONDS):
+                if control is not None:
+                    if control.wait_for_change(
+                        stop_event,
+                        LOGIN_RETRY_SECONDS,
+                    ):
+                        break
+                elif stop_wait(stop_event, LOGIN_RETRY_SECONDS):
                     return
+            except BaseException:
+                if control is not None:
+                    control.end_session(session_stop)
+                raise
 
 
 def positive_speed(value: str) -> float:
@@ -1776,6 +2149,12 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     stop_event = threading.Event()
     install_stop_handlers(stop_event)
+    try:
+        auto_record_enabled = control_state.get_auto_record_enabled()
+    except control_state.ControlStateError as exc:
+        # 控制檔異常時 fail closed，避免未經允許連線訂閱。
+        auto_record_enabled = False
+        print(f"錄製控制狀態 FAILED（{type(exc).__name__}）", flush=True)
     record_out = (
         relative_path(args.record_out) if args.record_out else None
     )
@@ -1806,7 +2185,7 @@ def main(argv: list[str] | None = None) -> int:
             window_end=window_end,
             service_status="replay",
             stale_after_seconds=args.stale_after_sec,
-            record_path=record_out,
+            auto_record_enabled=auto_record_enabled,
         )
         runtime.reset_detector(
             metadata,
@@ -1821,12 +2200,23 @@ def main(argv: list[str] | None = None) -> int:
             next_window_at=None,
             now_override=iso_taipei(rows[0][0]) if rows else None,
         )
-        source_target = lambda: replay_worker(
+        replay_start_clock, replay_end_clock = default_clock(session)
+        control = RecordingControl(
+            runtime,
+            mode="replay",
+            auto_record_enabled=auto_record_enabled,
+            session=session,
+            start_clock=replay_start_clock,
+            end_clock=replay_end_clock,
+        )
+        source_target = lambda: replay_control_worker(
             runtime,
             rows,
+            metadata,
             speed=args.speed,
-            stop_event=stop_event,
-            record_metadata=metadata if record_out is not None else None,
+            service_stop_event=stop_event,
+            control=control,
+            record_out=record_out,
             result_path=result_out,
         )
         source_name = "auction-replay-source"
@@ -1846,8 +2236,17 @@ def main(argv: list[str] | None = None) -> int:
             window_end=end_clock.strftime("%H:%M"),
             service_status="idle",
             stale_after_seconds=args.stale_after_sec,
+            auto_record_enabled=auto_record_enabled,
         )
         runtime.set_context(next_window_at=iso_taipei(start_at))
+        control = RecordingControl(
+            runtime,
+            mode="live",
+            auto_record_enabled=auto_record_enabled,
+            session=args.session,
+            start_clock=start_clock,
+            end_clock=end_clock,
+        )
         source_target = lambda: live_worker(
             runtime,
             session=args.session,
@@ -1858,6 +2257,7 @@ def main(argv: list[str] | None = None) -> int:
             record_enabled=not args.no_record,
             record_out=record_out,
             result_out=result_out,
+            control=control,
         )
         source_name = "auction-live-source"
         mode_label = (
@@ -1885,9 +2285,11 @@ def main(argv: list[str] | None = None) -> int:
             runtime.shared,
             host=args.host,
             port=args.port,
+            control_handler=control.handle_request,
         )
     except Exception as exc:
         stop_event.set()
+        control.shutdown()
         print(
             f"HTTP 啟動 FAILED（{type(exc).__name__}）",
             flush=True,
@@ -1912,6 +2314,7 @@ def main(argv: list[str] | None = None) -> int:
         stop_event.set()
     finally:
         stop_event.set()
+        control.shutdown()
         stopper = getattr(webserver, "stop_server", None)
         if callable(stopper):
             stopper(server)

@@ -972,9 +972,16 @@ class ServiceRecordTests(unittest.TestCase):
         self.assertIn("anomaly", api_state["counts"])
         self.assertEqual(api_state["counts"]["anomaly"], 0)
         self.assertFalse(api_state["anomaly_thresholds"]["calibrated"])
+        self.assertFalse(
+            api_state["fake_grade_thresholds"]["calibrated"]
+        )
         self.assertEqual(len(api_state["stocks"]), 1)
         self.assertEqual(api_state["stocks"][0]["anomalies"], [])
         self.assertEqual(api_state["stocks"][0]["anomaly_score"], 0)
+        self.assertIn("max_bid0_volume", api_state["stocks"][0])
+        self.assertIn("lock_duration_sec", api_state["stocks"][0])
+        self.assertIn("open_gap_ref_pct", api_state["stocks"][0])
+        self.assertIn("grade", api_state["stocks"][0])
 
 
 if __name__ == "__main__":

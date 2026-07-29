@@ -19,6 +19,7 @@ UI_DIR = Path(__file__).resolve().parent / "ui"
 INDEX_PATH = UI_DIR / "index.html"
 
 StateProvider = Callable[[], Mapping[str, Any]] | Any
+ControlHandler = Callable[[str, bool | None], Mapping[str, Any]]
 
 _LOGGER = logging.getLogger(__name__)
 _CONTENT_SECURITY_POLICY = (
@@ -78,8 +79,10 @@ class LocalHTTPServer(ThreadingHTTPServer):
         self,
         server_address: tuple[str, int],
         state_provider: StateProvider,
+        control_handler: ControlHandler | None = None,
     ) -> None:
         self.state_provider = state_provider
+        self.control_handler = control_handler
         self.serve_thread: threading.Thread | None = None
         super().__init__(server_address, DetectorRequestHandler)
 
@@ -112,6 +115,119 @@ class DetectorRequestHandler(BaseHTTPRequestHandler):
             404,
             {"error": "not_found", "message": "找不到指定的本機資源"},
         )
+
+    def do_POST(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
+        path = unquote(urlsplit(self.path).path)
+        if path != "/api/control":
+            self._send_json(
+                404,
+                {"error": "not_found", "message": "找不到指定的本機資源"},
+            )
+            return
+        self._serve_control()
+
+    def _serve_control(self) -> None:
+        handler = self.server.control_handler
+        if handler is None:
+            self._send_json(
+                503,
+                {
+                    "error": "control_unavailable",
+                    "message": "目前服務未啟用錄製控制",
+                },
+            )
+            return
+
+        raw_length = self.headers.get("Content-Length")
+        try:
+            content_length = int(raw_length or "")
+        except ValueError:
+            content_length = -1
+        if content_length < 1:
+            self._send_json(
+                400,
+                {
+                    "error": "invalid_body",
+                    "message": "請提供 JSON request body",
+                },
+            )
+            return
+        if content_length > 16_384:
+            self._send_json(
+                413,
+                {
+                    "error": "body_too_large",
+                    "message": "request body 過大",
+                },
+            )
+            return
+
+        try:
+            payload = json.loads(self.rfile.read(content_length))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            self._send_json(
+                400,
+                {
+                    "error": "invalid_json",
+                    "message": "request body 必須是有效 JSON",
+                },
+            )
+            return
+        if not isinstance(payload, dict):
+            self._send_json(
+                400,
+                {
+                    "error": "invalid_body",
+                    "message": "request body 必須是 JSON object",
+                },
+            )
+            return
+
+        action = payload.get("action")
+        if action not in {"set_auto", "stop", "start"}:
+            self._send_json(
+                400,
+                {
+                    "error": "invalid_action",
+                    "message": "action 必須是 set_auto、stop 或 start",
+                },
+            )
+            return
+        enabled: bool | None = None
+        if action == "set_auto":
+            enabled = payload.get("enabled")
+            if type(enabled) is not bool:
+                self._send_json(
+                    400,
+                    {
+                        "error": "invalid_enabled",
+                        "message": "set_auto 的 enabled 必須是 boolean",
+                    },
+                )
+                return
+
+        try:
+            state = handler(action, enabled)
+            if not isinstance(state, Mapping):
+                raise TypeError("control handler must return a mapping")
+            self._send_json(200, state)
+        except Exception as exc:
+            status = int(getattr(exc, "status_code", 500))
+            error = str(getattr(exc, "error_code", "control_failed"))
+            if status < 400 or status > 599:
+                status = 500
+            if status >= 500:
+                _LOGGER.exception(
+                    "Recording control failed (%s)",
+                    type(exc).__name__,
+                )
+                message = "錄製控制暫時無法完成"
+            else:
+                message = str(exc) or "錄製控制要求無法執行"
+            self._send_json(
+                status,
+                {"error": error, "message": message},
+            )
 
     def _serve_state(self) -> None:
         try:
@@ -206,10 +322,15 @@ def create_server(
     *,
     host: str = HOST,
     port: int = DEFAULT_PORT,
+    control_handler: ControlHandler | None = None,
 ) -> LocalHTTPServer:
     """Create, but do not start, a localhost-only detector server."""
     _validate_local_host(host)
-    return LocalHTTPServer((host, int(port)), state_provider)
+    return LocalHTTPServer(
+        (host, int(port)),
+        state_provider,
+        control_handler,
+    )
 
 
 def start_server(
@@ -217,9 +338,15 @@ def start_server(
     *,
     host: str = HOST,
     port: int = DEFAULT_PORT,
+    control_handler: ControlHandler | None = None,
 ) -> LocalHTTPServer:
     """Start the detector web server in a daemon background thread."""
-    server = create_server(state_provider, host=host, port=port)
+    server = create_server(
+        state_provider,
+        host=host,
+        port=port,
+        control_handler=control_handler,
+    )
     thread = threading.Thread(
         target=server.serve_forever,
         name="auction-detector-web",
@@ -244,9 +371,15 @@ def serve_forever(
     *,
     host: str = HOST,
     port: int = DEFAULT_PORT,
+    control_handler: ControlHandler | None = None,
 ) -> None:
     """Run a localhost-only detector server in the current thread."""
-    server = create_server(state_provider, host=host, port=port)
+    server = create_server(
+        state_provider,
+        host=host,
+        port=port,
+        control_handler=control_handler,
+    )
     try:
         server.serve_forever()
     finally:

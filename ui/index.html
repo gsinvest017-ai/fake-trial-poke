@@ -24,6 +24,14 @@
       --watching-soft: #EFEBE4;
       --anomaly: #526D82;
       --anomaly-soft: #EAF1F5;
+      --tier-t1: #A9352E;
+      --tier-t1-soft: #FBE9E5;
+      --tier-t2: #A86511;
+      --tier-t2-soft: #F8EEDB;
+      --tier-t3: #386C78;
+      --tier-t3-soft: #E7F1F3;
+      --tier-t4: #706B61;
+      --tier-t4-soft: #EFEBE4;
       --shadow: 0 12px 32px rgba(55, 44, 25, 0.07);
       --radius-xl: 24px;
       --radius-lg: 18px;
@@ -387,6 +395,184 @@
       color: var(--fake);
     }
 
+    .record-control {
+      display: grid;
+      grid-template-columns: minmax(250px, 1fr) auto auto;
+      align-items: center;
+      min-width: 0;
+      gap: 12px 18px;
+      margin-bottom: 18px;
+      padding: 14px 16px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius-lg);
+      background: rgba(255, 255, 255, 0.84);
+      box-shadow: 0 8px 22px rgba(55, 44, 25, 0.05);
+    }
+
+    .record-control-title {
+      margin: 0 0 5px;
+      font-size: 0.94rem;
+      font-weight: 850;
+    }
+
+    .record-control-states {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+
+    .record-state {
+      display: inline-flex;
+      align-items: center;
+      min-height: 25px;
+      padding: 3px 9px;
+      border: 1px solid var(--line-strong);
+      border-radius: 999px;
+      background: var(--watching-soft);
+      color: #5F594F;
+      font-size: 0.7rem;
+      font-weight: 750;
+      white-space: nowrap;
+    }
+
+    .record-state.on {
+      border-color: rgba(47, 125, 91, 0.3);
+      background: var(--touched-soft);
+      color: var(--touched);
+    }
+
+    .record-state.recording {
+      border-color: rgba(200, 50, 42, 0.3);
+      background: var(--fake-soft);
+      color: var(--fake);
+    }
+
+    .auto-record-toggle {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      min-height: 40px;
+      color: var(--ink);
+      font-size: 0.82rem;
+      font-weight: 800;
+      cursor: pointer;
+      user-select: none;
+    }
+
+    .switch-input {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0 0 0 0);
+      white-space: nowrap;
+      clip-path: inset(50%);
+    }
+
+    .switch-track {
+      position: relative;
+      width: 46px;
+      height: 26px;
+      flex: 0 0 auto;
+      border: 1px solid var(--line-strong);
+      border-radius: 999px;
+      background: var(--watching-soft);
+      transition: background 150ms ease, border-color 150ms ease;
+    }
+
+    .switch-track::after {
+      position: absolute;
+      top: 3px;
+      left: 3px;
+      width: 18px;
+      height: 18px;
+      border-radius: 999px;
+      background: var(--surface);
+      box-shadow: 0 1px 5px rgba(35, 32, 25, 0.24);
+      content: "";
+      transition: transform 150ms ease;
+    }
+
+    .switch-input:checked + .switch-track {
+      border-color: var(--touched);
+      background: var(--touched);
+    }
+
+    .switch-input:checked + .switch-track::after {
+      transform: translateX(20px);
+    }
+
+    .switch-input:focus-visible + .switch-track {
+      outline: 3px solid rgba(82, 109, 130, 0.24);
+      outline-offset: 2px;
+    }
+
+    .switch-input:disabled + .switch-track,
+    .switch-input:disabled ~ .switch-label {
+      cursor: not-allowed;
+      opacity: 0.55;
+    }
+
+    .record-control-actions {
+      display: flex;
+      align-items: center;
+      justify-content: flex-end;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    .record-control-button {
+      min-height: 38px;
+      padding: 7px 12px;
+      border: 1px solid var(--line-strong);
+      border-radius: 10px;
+      background: var(--surface);
+      color: var(--ink);
+      font-size: 0.78rem;
+      font-weight: 800;
+      cursor: pointer;
+      transition: border-color 150ms ease, background 150ms ease, color 150ms ease;
+    }
+
+    .record-control-button:hover:not(:disabled) {
+      border-color: var(--anomaly);
+      background: var(--anomaly-soft);
+    }
+
+    .record-control-button.stop:hover:not(:disabled) {
+      border-color: var(--fake);
+      background: var(--fake-soft);
+      color: var(--fake);
+    }
+
+    .record-control-button:focus-visible {
+      outline: 3px solid rgba(82, 109, 130, 0.24);
+      outline-offset: 2px;
+    }
+
+    .record-control-button:disabled {
+      cursor: not-allowed;
+      opacity: 0.48;
+    }
+
+    .record-control-feedback {
+      grid-column: 1 / -1;
+      min-height: 1.2em;
+      margin: -4px 0 0;
+      color: var(--muted);
+      font-size: 0.72rem;
+    }
+
+    .record-control-feedback.success {
+      color: var(--touched);
+    }
+
+    .record-control-feedback.error {
+      color: var(--fake);
+    }
+
     .content-layout {
       display: grid;
       grid-template-columns: minmax(0, 1fr) minmax(290px, 360px);
@@ -427,95 +613,275 @@
       text-align: right;
     }
 
-    .locked-panel {
+    .fake-grade-panel {
       margin-bottom: 18px;
       overflow: hidden;
     }
 
-    .locked-panel-note {
-      margin-top: 3px;
+    .fake-grade-heading {
+      flex: 1 1 auto;
+      min-width: 0;
+    }
+
+    .fake-grade-guide {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 7px;
+      margin: 10px 0 0;
+      padding: 0;
+      color: #4B3A2E;
+      font-size: 0.72rem;
+      line-height: 1.42;
+      list-style: none;
+    }
+
+    .fake-grade-guide-item {
+      min-width: 0;
+      padding: 8px 9px;
+      border: 1px solid rgba(169, 120, 74, 0.18);
+      border-radius: 9px;
+      background: rgba(255, 255, 255, 0.58);
+      overflow-wrap: anywhere;
+    }
+
+    .fake-grade-guide-label {
+      display: block;
+      margin-bottom: 2px;
+      color: #3E2E24;
+      font-weight: 800;
+    }
+
+    .fake-grade-note {
+      margin-top: 6px;
+      color: #8A7459;
+      font-size: 0.66rem;
+      line-height: 1.4;
       text-align: left;
     }
 
-    .locked-table-wrap {
-      width: 100%;
-      max-width: 100%;
+    .fake-grade-panel {
+      border-color: #D5C8B8;
+    }
+
+    .fake-grade-panel .panel-header {
+      background: linear-gradient(90deg, rgba(251, 233, 229, 0.62), rgba(255, 255, 255, 0.96));
+    }
+
+    .fake-grade-note {
+      overflow-wrap: anywhere;
+    }
+
+    .fake-grade-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
       min-width: 0;
-      overflow-x: auto;
-      overscroll-behavior-inline: contain;
-      scrollbar-color: var(--line-strong) transparent;
-      scrollbar-width: thin;
+      gap: 12px;
+      padding: 16px;
+      background: linear-gradient(180deg, rgba(251, 233, 229, 0.42), rgba(255, 255, 255, 0.35));
     }
 
-    .locked-table {
-      width: 100%;
-      min-width: 1050px;
-      border-collapse: collapse;
-      background: var(--surface);
+    .fake-grade-grid > .empty-state {
+      grid-column: 1 / -1;
     }
 
-    .locked-table th,
-    .locked-table td {
-      padding: 12px 14px;
-      border-bottom: 1px solid var(--line);
-      text-align: right;
+    .fake-grade-card {
+      --grade-color: var(--tier-t4);
+      --grade-soft: var(--tier-t4-soft);
+      position: relative;
+      min-width: 0;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: var(--radius-lg);
+      background: rgba(255, 255, 255, 0.96);
+      box-shadow: 0 6px 16px rgba(55, 44, 25, 0.055);
+    }
+
+    .fake-grade-card::before {
+      position: absolute;
+      inset: 0 auto 0 0;
+      width: 3px;
+      background: var(--grade-color);
+      content: "";
+    }
+
+    .fake-grade-card.grade-t1 {
+      --grade-color: var(--tier-t1);
+      --grade-soft: var(--tier-t1-soft);
+      border: 2px solid rgba(169, 53, 46, 0.48);
+      background: linear-gradient(145deg, rgba(251, 233, 229, 0.9), rgba(255, 255, 255, 0.98) 72%);
+      box-shadow: 0 11px 25px rgba(169, 53, 46, 0.13);
+    }
+
+    .fake-grade-card.grade-t1::before {
+      width: 6px;
+    }
+
+    .fake-grade-card.grade-t2 {
+      --grade-color: var(--tier-t2);
+      --grade-soft: var(--tier-t2-soft);
+      border-color: rgba(168, 101, 17, 0.34);
+      background: linear-gradient(145deg, rgba(248, 238, 219, 0.68), rgba(255, 255, 255, 0.98) 76%);
+      box-shadow: 0 8px 20px rgba(168, 101, 17, 0.09);
+    }
+
+    .fake-grade-card.grade-t2::before {
+      width: 5px;
+    }
+
+    .fake-grade-card.grade-t3 {
+      --grade-color: var(--tier-t3);
+      --grade-soft: var(--tier-t3-soft);
+      border-color: rgba(56, 108, 120, 0.27);
+      background: linear-gradient(145deg, rgba(231, 241, 243, 0.48), rgba(255, 255, 255, 0.98) 78%);
+    }
+
+    .fake-grade-card.grade-t4 {
+      --grade-color: var(--tier-t4);
+      --grade-soft: var(--tier-t4-soft);
+      border-color: rgba(112, 107, 97, 0.2);
+      background: rgba(255, 255, 255, 0.88);
+      box-shadow: 0 4px 12px rgba(55, 44, 25, 0.035);
+    }
+
+    .fake-grade-card.grade-t4::before {
+      width: 2px;
+      opacity: 0.72;
+    }
+
+    .fake-grade-card-head {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      min-width: 0;
+      gap: 10px;
+      padding: 16px 15px 12px 19px;
+    }
+
+    .fake-grade-stock {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
       white-space: nowrap;
     }
 
-    .locked-table th {
-      background: var(--paper);
+    .fake-grade-stock .stock-name {
+      font-size: 1rem;
+    }
+
+    .fake-grade-first-lock {
+      display: flex;
+      align-items: flex-end;
+      justify-content: space-between;
+      min-width: 0;
+      gap: 10px;
+      margin: 0 15px 13px 19px;
+      padding: 11px 12px 10px;
+      border: 1px solid color-mix(in srgb, var(--grade-color) 22%, var(--line));
+      border-radius: var(--radius-md);
+      background: color-mix(in srgb, var(--grade-soft) 66%, white);
+    }
+
+    .fake-grade-first-lock-label {
       color: var(--muted);
       font-size: 0.68rem;
       font-weight: 800;
       letter-spacing: 0.05em;
+      white-space: nowrap;
     }
 
-    .locked-table th:first-child,
-    .locked-table td:first-child {
-      padding-left: 22px;
-      text-align: left;
+    .fake-grade-first-lock-value {
+      min-width: 0;
+      overflow: hidden;
+      color: var(--grade-color);
+      font-family: Georgia, ui-serif, serif;
+      font-size: clamp(1.28rem, 2vw, 1.58rem);
+      font-weight: 850;
+      line-height: 1;
+      text-overflow: ellipsis;
+      white-space: nowrap;
     }
 
-    .locked-table th:nth-child(2),
-    .locked-table td:nth-child(2) {
-      text-align: left;
+    .fake-grade-metrics {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      min-width: 0;
+      overflow: hidden;
+      margin: 0 15px 15px 19px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius-md);
+      background: rgba(255, 255, 255, 0.72);
     }
 
-    .locked-table th:last-child,
-    .locked-table td:last-child {
-      padding-right: 22px;
+    .fake-grade-metric {
+      min-width: 0;
+      padding: 10px 11px 9px;
     }
 
-    .locked-table tbody tr:last-child td {
-      border-bottom: 0;
+    .fake-grade-metric:nth-child(odd) {
+      border-right: 1px solid var(--line);
     }
 
-    .locked-table tbody tr.suspected_fake td:first-child {
-      box-shadow: inset 3px 0 0 var(--fake);
+    .fake-grade-metric:nth-child(-n + 2) {
+      border-bottom: 1px solid var(--line);
     }
 
-    .locked-table tbody tr.locked_held td:first-child {
-      box-shadow: inset 3px 0 0 var(--held);
+    .fake-grade-metric-label {
+      margin-bottom: 2px;
+      color: var(--muted);
+      font-size: 0.64rem;
+      font-weight: 800;
+      letter-spacing: 0.03em;
+      white-space: nowrap;
     }
 
-    .locked-table tbody tr.touched td:first-child {
-      box-shadow: inset 3px 0 0 var(--touched);
-    }
-
-    .locked-table .stock-name {
-      font-size: 0.92rem;
-    }
-
-    .locked-table .status-badge {
-      min-height: 24px;
-      padding: 3px 8px;
-      font-size: 0.68rem;
-    }
-
-    .locked-table-value {
+    .fake-grade-metric-value {
+      min-width: 0;
+      overflow: hidden;
       color: var(--ink);
-      font-size: 0.82rem;
-      font-weight: 750;
+      font-family: Georgia, ui-serif, serif;
+      font-size: 1.05rem;
+      font-weight: 850;
+      line-height: 1.25;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .grade-badge {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 74px;
+      min-height: 27px;
+      padding: 3px 9px;
+      border: 1px solid var(--line-strong);
+      border-radius: 999px;
+      font-size: 0.72rem;
+      font-weight: 900;
+      white-space: nowrap;
+    }
+
+    .grade-badge.grade-t1 {
+      border-color: rgba(169, 53, 46, 0.3);
+      background: var(--tier-t1-soft);
+      color: var(--tier-t1);
+    }
+
+    .grade-badge.grade-t2 {
+      border-color: rgba(168, 101, 17, 0.3);
+      background: var(--tier-t2-soft);
+      color: var(--tier-t2);
+    }
+
+    .grade-badge.grade-t3 {
+      border-color: rgba(56, 108, 120, 0.3);
+      background: var(--tier-t3-soft);
+      color: var(--tier-t3);
+    }
+
+    .grade-badge.grade-t4 {
+      border-color: rgba(112, 107, 97, 0.28);
+      background: var(--tier-t4-soft);
+      color: var(--tier-t4);
     }
 
     .anomaly-panel {
@@ -1024,6 +1390,14 @@
         grid-template-columns: minmax(0, 1fr);
       }
 
+      .fake-grade-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+
+      .fake-grade-guide {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+
       .anomaly-grid {
         grid-template-columns: repeat(2, minmax(0, 1fr));
       }
@@ -1042,6 +1416,15 @@
     }
 
     @media (max-width: 860px) {
+      .record-control {
+        grid-template-columns: minmax(0, 1fr) auto;
+      }
+
+      .record-control-actions {
+        grid-column: 1 / -1;
+        justify-content: flex-start;
+      }
+
       .content-layout {
         grid-template-columns: minmax(0, 1fr);
       }
@@ -1119,6 +1502,22 @@
         border-bottom: 0;
       }
 
+      .record-control {
+        grid-template-columns: minmax(0, 1fr);
+      }
+
+      .record-control-actions {
+        grid-column: auto;
+      }
+
+      .auto-record-toggle {
+        justify-content: space-between;
+      }
+
+      .record-control-button {
+        flex: 1 1 140px;
+      }
+
       .panel {
         border-radius: var(--radius-lg);
       }
@@ -1126,6 +1525,15 @@
       .panel-header {
         align-items: flex-start;
         padding: 16px;
+      }
+
+      .fake-grade-grid {
+        grid-template-columns: minmax(0, 1fr);
+        padding: 9px;
+      }
+
+      .fake-grade-guide {
+        grid-template-columns: minmax(0, 1fr);
       }
 
       .stock-grid {
@@ -1223,6 +1631,42 @@
       </div>
     </section>
 
+    <section class="record-control" aria-labelledby="record-control-title">
+      <div>
+        <h2 class="record-control-title" id="record-control-title">錄製控制</h2>
+        <div class="record-control-states" aria-live="polite">
+          <span class="record-state" id="auto-record-state">明天自動錄製：讀取中</span>
+          <span class="record-state" id="today-record-state">今日錄製：讀取中</span>
+        </div>
+      </div>
+      <label class="auto-record-toggle" for="auto-record-switch">
+        <input
+          class="switch-input"
+          id="auto-record-switch"
+          type="checkbox"
+          role="switch"
+          aria-describedby="record-control-feedback"
+          disabled
+        >
+        <span class="switch-track" aria-hidden="true"></span>
+        <span class="switch-label">明天自動錄製</span>
+      </label>
+      <div class="record-control-actions">
+        <button class="record-control-button" id="start-record-button" type="button" disabled>
+          立即開始
+        </button>
+        <button class="record-control-button stop" id="stop-record-button" type="button" disabled>
+          停止今日錄製
+        </button>
+      </div>
+      <p
+        class="record-control-feedback"
+        id="record-control-feedback"
+        role="status"
+        aria-live="polite"
+      ></p>
+    </section>
+
     <section class="health-strip" aria-label="資料流與錄製狀態">
       <div class="health-cell recording-cell" id="recording-cell">
         <div class="cell-label">原始事件落地</div>
@@ -1249,36 +1693,38 @@
       </div>
     </section>
 
-    <section class="panel locked-panel" aria-labelledby="locked-title">
+    <section class="panel fake-grade-panel" aria-labelledby="fake-grade-title">
       <header class="panel-header">
-        <div>
-          <h2 class="panel-title" id="locked-title">曾鎖漲停</h2>
-          <p class="panel-meta locked-panel-note">盤中一鎖即列入・每秒更新</p>
+        <div class="fake-grade-heading">
+          <h2 class="panel-title" id="fake-grade-title">疑似假試撮買量分級</h2>
+          <ul class="fake-grade-guide" aria-label="四格指標白話說明">
+            <li class="fake-grade-guide-item">
+              <strong class="fake-grade-guide-label">買一堆量（張）</strong>
+              試撮時有人在漲停價掛的買單量，是「假拉漲停」的誘餌——越大越像故意做給人看（分級 T1～T4 就看這個量）。
+            </li>
+            <li class="fake-grade-guide-item">
+              <strong class="fake-grade-guide-label">鎖秒</strong>
+              漲停價鎖住撐了多久，越短越可疑（閃一下就撤、擺個樣子）。
+            </li>
+            <li class="fake-grade-guide-item">
+              <strong class="fake-grade-guide-label">對漲停 %</strong>
+              真正開盤價 vs 試撮裝出來的漲停價（幾乎都是負的，沒人真開在漲停）。
+            </li>
+            <li class="fake-grade-guide-item">
+              <strong class="fake-grade-guide-label">對前收 %</strong>
+              真正開盤價 vs 昨天收盤——演漲停卻開跌，就是「假試撮」最直接的鐵證。
+            </li>
+          </ul>
+          <p class="panel-meta fake-grade-note" id="fake-grade-note">
+            資料日期：--｜門檻未校準、可調；T1 大單 ≥500 張、T2 中量 200–499 張、T3 邊緣 100–199 張、T4 薄量 &lt;100 張。保留全部標的，不硬砍。
+          </p>
         </div>
         <p class="panel-meta" id="locked-summary">0 檔</p>
       </header>
-      <div class="locked-table-wrap" id="locked-table-wrap" aria-live="polite">
+      <div class="fake-grade-grid" id="fake-grade-grid" aria-live="polite">
         <div class="empty-state">
-          <span class="empty-icon" aria-hidden="true">◇</span>
-          今日尚無個股鎖過漲停
-        </div>
-      </div>
-    </section>
-
-    <section class="panel anomaly-panel" aria-labelledby="anomalies-title">
-      <header class="panel-header">
-        <div class="anomaly-heading">
-          <h2 class="panel-title" id="anomalies-title">異常標的重點卡片（異常分數 ≥ 2）</h2>
-          <p class="calibration-note" id="anomaly-threshold-note">
-            暫定門檻：峰值 ≥300 張且撤 ≥70%、振幅 ≥5%、跳空 ≥4%；門檻未經真實資料校準、可調。
-          </p>
-        </div>
-        <p class="panel-meta" id="anomaly-summary">0 檔</p>
-      </header>
-      <div class="anomaly-grid" id="anomaly-grid" aria-live="polite">
-        <div class="empty-state">
-          <span class="empty-icon" aria-hidden="true">◇</span>
-          尚無異常分數 ≥ 2 的標的
+          <span class="empty-icon" aria-hidden="true">—</span>
+          今日尚無疑似假試撮標的
         </div>
       </div>
     </section>
@@ -1332,6 +1778,12 @@
         watching: { icon: "◌", label: "觀察中", className: "watching" },
         none: { icon: "－", label: "尚無訊號", className: "none" }
       };
+      const GRADE = {
+        T1: { icon: "▲", label: "大單", className: "grade-t1", rank: 1 },
+        T2: { icon: "●", label: "中量", className: "grade-t2", rank: 2 },
+        T3: { icon: "◆", label: "邊緣", className: "grade-t3", rank: 3 },
+        T4: { icon: "－", label: "薄量", className: "grade-t4", rank: 4 }
+      };
       const ANOMALY = {
         ANOM_BIG_BID_WITHDRAW: "大單驟撤",
         ANOM_BID0_SWING: "試撮劇震",
@@ -1359,6 +1811,12 @@
         countTouched: document.getElementById("count-touched"),
         countWatching: document.getElementById("count-watching"),
         countAnomaly: document.getElementById("count-anomaly"),
+        autoRecordState: document.getElementById("auto-record-state"),
+        todayRecordState: document.getElementById("today-record-state"),
+        autoRecordSwitch: document.getElementById("auto-record-switch"),
+        startRecordButton: document.getElementById("start-record-button"),
+        stopRecordButton: document.getElementById("stop-record-button"),
+        recordControlFeedback: document.getElementById("record-control-feedback"),
         recordingCell: document.getElementById("recording-cell"),
         recordingStatus: document.getElementById("recording-status"),
         recordingDot: document.getElementById("recording-dot"),
@@ -1367,11 +1825,9 @@
         lastEventAge: document.getElementById("last-event-age"),
         loginStatus: document.getElementById("login-status"),
         subscribeStatus: document.getElementById("subscribe-status"),
+        fakeGradeNote: document.getElementById("fake-grade-note"),
         lockedSummary: document.getElementById("locked-summary"),
-        lockedTableWrap: document.getElementById("locked-table-wrap"),
-        anomalySummary: document.getElementById("anomaly-summary"),
-        anomalyThresholdNote: document.getElementById("anomaly-threshold-note"),
-        anomalyGrid: document.getElementById("anomaly-grid"),
+        fakeGradeGrid: document.getElementById("fake-grade-grid"),
         stockSummary: document.getElementById("stock-summary"),
         connectionNote: document.getElementById("connection-note"),
         stockGrid: document.getElementById("stock-grid"),
@@ -1383,7 +1839,8 @@
       let seenAlerts = new Set();
       let initializedAlerts = false;
       let pollTimer = null;
-      let lockedTableRenderKey = null;
+      let fakeGradeRenderKey = null;
+      let controlBusy = false;
 
       const numberFormatter = new Intl.NumberFormat("zh-TW");
       const priceFormatter = new Intl.NumberFormat("zh-TW", {
@@ -1469,7 +1926,7 @@
         const totalSeconds = Math.round(duration);
         const minutes = Math.floor(totalSeconds / 60);
         const seconds = totalSeconds % 60;
-        return minutes > 0 ? `${minutes} 分 ${seconds} 秒` : `${seconds} 秒`;
+        return minutes > 0 ? `${minutes}分${seconds}秒` : `${seconds}秒`;
       }
 
       function countdown(targetValue) {
@@ -1557,210 +2014,130 @@
         };
       }
 
-      function renderAnomalies(stocks, thresholds) {
-        const anomalous = stocks
-          .filter((stock) => (finiteNumber(stock.anomaly_score) ?? 0) >= 2)
+      function gradeDescriptor(stock) {
+        const peakVolume = finiteNumber(stock.max_bid0_volume ?? stock.bid0_peak_volume) ?? 0;
+        let grade = safeText(stock.grade, "");
+        if (!Object.prototype.hasOwnProperty.call(GRADE, grade)) {
+          grade = peakVolume >= 500 ? "T1"
+            : peakVolume >= 200 ? "T2"
+              : peakVolume >= 100 ? "T3" : "T4";
+        }
+        return {
+          grade,
+          peakVolume,
+          ...GRADE[grade]
+        };
+      }
+
+      function renderFakeGradeStocks(stocks, dateValue, rawThresholds) {
+        const thresholds = rawThresholds && typeof rawThresholds === "object"
+          ? rawThresholds
+          : {};
+        const t1Min = finiteNumber(thresholds.t1_min_lots) ?? 500;
+        const t2Min = finiteNumber(thresholds.t2_min_lots) ?? 200;
+        const t3Min = finiteNumber(thresholds.t3_min_lots) ?? 100;
+        const dateText = safeText(dateValue);
+        elements.fakeGradeNote.textContent =
+          `資料日期：${dateText}｜門檻未校準、可調；` +
+          `T1 大單 ≥${formatVolume(t1Min)} 張、` +
+          `T2 中量 ${formatVolume(t2Min)}–${formatVolume(t1Min - 1)} 張、` +
+          `T3 邊緣 ${formatVolume(t3Min)}–${formatVolume(t2Min - 1)} 張、` +
+          `T4 薄量 <${formatVolume(t3Min)} 張。保留全部標的，不硬砍。`;
+
+        const fakeStocks = stocks
+          .filter((stock) => stock.status === "suspected_fake")
+          .map((stock) => ({ stock, grade: gradeDescriptor(stock) }))
           .sort((left, right) => {
-            const scoreDiff = (finiteNumber(right.anomaly_score) ?? 0)
-              - (finiteNumber(left.anomaly_score) ?? 0);
-            return scoreDiff || safeText(left.code, "").localeCompare(safeText(right.code, ""));
+            return left.grade.rank - right.grade.rank
+              || right.grade.peakVolume - left.grade.peakVolume
+              || safeText(left.stock.code, "").localeCompare(safeText(right.stock.code, ""));
           });
-        const values = thresholds && typeof thresholds === "object" ? thresholds : {};
-        const peakLots = finiteNumber(values.bid_peak_lots) ?? 300;
-        const withdrawPct = finiteNumber(values.bid_withdraw_pct) ?? 70;
-        const swingPct = finiteNumber(values.swing_pct) ?? 5;
-        const gapPct = finiteNumber(values.gap_pct) ?? 4;
 
-        elements.anomalyThresholdNote.textContent =
-          `暫定門檻：峰值 ≥${formatVolume(peakLots)} 張且撤 ≥${formatPercent(withdrawPct)}、` +
-          `振幅 ≥${formatPercent(swingPct)}、跳空 ≥${formatPercent(gapPct)}；` +
-          "門檻未經真實資料校準、可調。";
-        elements.anomalySummary.textContent =
-          `${numberFormatter.format(anomalous.length)} 檔`;
-        elements.anomalyGrid.replaceChildren();
-
-        if (!anomalous.length) {
+        const renderRows = fakeStocks.map(({ stock, grade }) => ({
+          code: safeText(stock.code),
+          name: safeText(stock.name, "未命名"),
+          firstLockTime: formatTime(stock.first_lock_time),
+          peakVolume: formatOptionalVolume(grade.peakVolume),
+          lockDuration: formatDuration(stock.lock_duration_sec),
+          limitGap: formatOptionalPercent(stock.open_gap_pct, true),
+          referenceGap: formatOptionalPercent(
+            stock.open_gap_ref_pct ?? stock.reference_open_gap_pct,
+            true
+          ),
+          grade: grade.grade,
+          gradeIcon: grade.icon,
+          gradeLabel: safeText(stock.grade_label, grade.label),
+          gradeClass: grade.className
+        }));
+        const renderKey = JSON.stringify(renderRows);
+        elements.lockedSummary.textContent =
+          `${numberFormatter.format(fakeStocks.length)} 檔｜${dateText}`;
+        if (renderKey === fakeGradeRenderKey) return;
+        fakeGradeRenderKey = renderKey;
+        elements.fakeGradeGrid.replaceChildren();
+        if (!fakeStocks.length) {
           const empty = makeElement("div", "empty-state");
           empty.append(
-            makeElement("span", "empty-icon", "◇"),
-            document.createTextNode("尚無異常分數 ≥ 2 的標的")
+            makeElement("span", "empty-icon", "—"),
+            document.createTextNode("今日尚無疑似假試撮標的")
           );
-          elements.anomalyGrid.append(empty);
+          elements.fakeGradeGrid.append(empty);
           return;
         }
 
-        anomalous.forEach((stock) => {
-          const card = makeElement("article", "anomaly-card");
+        renderRows.forEach((values) => {
+          const card = makeElement("article", `fake-grade-card ${values.gradeClass}`);
           card.setAttribute(
             "aria-label",
-            `${safeText(stock.code)} ${safeText(stock.name, "")}，異常分數 ${formatVolume(stock.anomaly_score)}`
+            `${values.code} ${values.name}，${values.grade} ${values.gradeLabel}，首鎖 ${values.firstLockTime}`
           );
-          const head = makeElement("div", "anomaly-card-head");
-          head.append(
-            makeElement(
-              "div",
-              "anomaly-stock",
-              `${safeText(stock.code)} ${safeText(stock.name, "")}`.trim()
-            ),
-            makeElement(
-              "div",
-              "anomaly-score",
-              `異常分數 ${formatVolume(stock.anomaly_score)}`
-            )
+
+          const head = makeElement("div", "fake-grade-card-head");
+          const stockId = makeElement("div", "fake-grade-stock");
+          stockId.append(
+            makeElement("span", "stock-code", values.code),
+            makeElement("span", "stock-name", values.name)
           );
-          const hits = makeElement("div", "anomaly-hit-list");
-          const dimensions = Array.isArray(stock.anomalies) ? stock.anomalies : [];
-          dimensions.forEach((dimension) => {
-            hits.append(
-              makeElement("span", "anomaly-chip", anomalyDetails(stock, dimension).label)
-            );
-          });
-          const metrics = makeElement("div", "anomaly-metrics");
+          const badge = makeElement(
+            "span",
+            `grade-badge ${values.gradeClass}`,
+            `${values.gradeIcon} ${values.grade} ${values.gradeLabel}`
+          );
+          head.append(stockId, badge);
+
+          const firstLock = makeElement("div", "fake-grade-first-lock");
+          const firstLockValue = makeElement(
+            "time",
+            "fake-grade-first-lock-value",
+            values.firstLockTime
+          );
+          firstLock.append(
+            makeElement("span", "fake-grade-first-lock-label", "首鎖時間"),
+            firstLockValue
+          );
+
+          const metrics = makeElement("div", "fake-grade-metrics");
           [
-            {
-              label: "撤單 %",
-              value: formatPercent(stock.bid0_withdraw_pct),
-              note:
-                `${formatVolume(stock.bid0_peak_volume)} → ` +
-                `${formatVolume(stock.final_window_bid0_volume)} 張`
-            },
-            {
-              label: "振幅 %",
-              value: formatPercent(stock.bid0_swing_pct),
-              note:
-                `${formatPrice(stock.bid0_min_price)}–` +
-                `${formatPrice(stock.bid0_max_price)}`
-            },
-            {
-              label: "開盤跳空 %",
-              value: formatPercent(stock.reference_open_gap_pct, true),
-              note:
-                `${formatPrice(stock.reference)} → ` +
-                `${formatPrice(stock.open_price)}`
-            }
-          ].forEach((item) => {
-            const metric = makeElement("div", "anomaly-metric");
+            ["買一堆量（張）", values.peakVolume],
+            ["鎖秒", values.lockDuration],
+            ["對漲停 %", values.limitGap],
+            ["對前收 %", values.referenceGap]
+          ].forEach(([label, value]) => {
+            const metric = makeElement("div", "fake-grade-metric");
             metric.append(
-              makeElement("div", "anomaly-metric-label", item.label),
-              makeElement("div", "anomaly-metric-value", item.value),
-              makeElement("div", "anomaly-metric-note", item.note)
+              makeElement("div", "fake-grade-metric-label", label),
+              makeElement(
+                "div",
+                "fake-grade-metric-value",
+                value
+              )
             );
             metrics.append(metric);
           });
-          const note = makeElement(
-            "p",
-            "anomaly-card-note",
-            "其他異常觀察用；非試撮鎖漲停。門檻未校準、可調。"
-          );
-          card.append(head, hits, metrics, note);
-          elements.anomalyGrid.append(card);
+
+          card.append(head, firstLock, metrics);
+          elements.fakeGradeGrid.append(card);
         });
-      }
-
-      function renderLockedStocks(stocks) {
-        const statusRank = {
-          suspected_fake: 0,
-          locked_held: 1,
-          touched: 2
-        };
-        const lockedStocks = stocks
-          .filter((stock) => Boolean(stock.locked_limit_up ?? stock.locked))
-          .sort((left, right) => {
-            const rankDiff = (statusRank[left.status] ?? 99) - (statusRank[right.status] ?? 99);
-            const durationDiff = (finiteNumber(right.lock_duration_sec) ?? -1)
-              - (finiteNumber(left.lock_duration_sec) ?? -1);
-            return rankDiff
-              || durationDiff
-              || safeText(left.code, "").localeCompare(safeText(right.code, ""));
-          });
-
-        const renderRows = lockedStocks.map((stock) => {
-          const statusKey = Object.prototype.hasOwnProperty.call(statusRank, stock.status)
-            ? stock.status
-            : "touched";
-          const status = STATUS[statusKey];
-          const peakVolume = stock.max_bid0_volume ?? stock.bid0_peak_volume;
-          return [
-            safeText(stock.code),
-            safeText(stock.name, "未命名"),
-            statusKey,
-            status.icon,
-            status.label,
-            formatTime(stock.first_lock_time),
-            formatDuration(stock.lock_duration_sec),
-            formatOptionalPrice(stock.limit_up),
-            formatOptionalVolume(peakVolume),
-            formatOptionalPercent(stock.bid0_withdraw_pct),
-            formatOptionalPrice(stock.open_price),
-            formatOptionalPercent(stock.open_gap_pct, true)
-          ];
-        });
-        const renderKey = JSON.stringify(renderRows);
-        elements.lockedSummary.textContent = `${numberFormatter.format(lockedStocks.length)} 檔`;
-        if (renderKey === lockedTableRenderKey) return;
-        lockedTableRenderKey = renderKey;
-        elements.lockedTableWrap.replaceChildren();
-        if (!lockedStocks.length) {
-          const empty = makeElement("div", "empty-state");
-          empty.append(
-            makeElement("span", "empty-icon", "◇"),
-            document.createTextNode("今日尚無個股鎖過漲停")
-          );
-          elements.lockedTableWrap.append(empty);
-          return;
-        }
-
-        const table = makeElement("table", "locked-table");
-        table.setAttribute("aria-label", "今日曾鎖漲停個股");
-        const head = document.createElement("thead");
-        const headRow = document.createElement("tr");
-        [
-          "代碼／名稱",
-          "結局",
-          "首次鎖住",
-          "鎖住時長",
-          "漲停價",
-          "掛單峰量",
-          "撤單 %",
-          "開盤價",
-          "開盤缺口 %"
-        ].forEach((label) => {
-          const cell = makeElement("th", "", label);
-          cell.setAttribute("scope", "col");
-          headRow.append(cell);
-        });
-        head.append(headRow);
-
-        const body = document.createElement("tbody");
-        renderRows.forEach((values) => {
-          const statusKey = values[2];
-          const status = STATUS[statusKey];
-          const row = makeElement("tr", status.className);
-
-          const identity = makeElement("td", "locked-stock");
-          identity.append(
-            makeElement("span", "stock-code", values[0]),
-            makeElement("span", "stock-name", values[1])
-          );
-
-          const conclusion = document.createElement("td");
-          conclusion.append(
-            makeElement(
-              "span",
-              `status-badge ${status.className}`,
-              `${status.icon} ${status.label}`
-            )
-          );
-
-          row.append(identity, conclusion);
-          values.slice(5).forEach((value) => {
-            row.append(makeElement("td", "locked-table-value", value));
-          });
-          body.append(row);
-        });
-
-        table.append(head, body);
-        elements.lockedTableWrap.append(table);
       }
 
       function renderStocks(stocks) {
@@ -2021,6 +2398,48 @@
         element.className = "health-badge";
       }
 
+      function setControlFeedback(message, tone = "", source = "operation") {
+        elements.recordControlFeedback.textContent = message;
+        elements.recordControlFeedback.className =
+          `record-control-feedback${tone ? ` ${tone}` : ""}`;
+        elements.recordControlFeedback.dataset.source = source;
+      }
+
+      function renderRecordControl(state) {
+        const hasState = state && typeof state === "object";
+        const autoKnown = hasState && typeof state.auto_record_enabled === "boolean";
+        const recordingKnown = hasState && typeof state.recording === "boolean";
+        const autoEnabled = autoKnown && state.auto_record_enabled === true;
+        const recording = recordingKnown && state.recording === true;
+
+        elements.autoRecordState.textContent = autoKnown
+          ? `明天自動錄製：${autoEnabled ? "開" : "關"}`
+          : "明天自動錄製：狀態未知";
+        elements.autoRecordState.className = `record-state${autoEnabled ? " on" : ""}`;
+        elements.todayRecordState.textContent = recordingKnown
+          ? `今日錄製：${recording ? "錄製中" : "已停止"}`
+          : "今日錄製：狀態未知";
+        elements.todayRecordState.className =
+          `record-state${recording ? " recording" : ""}`;
+
+        elements.autoRecordSwitch.checked = autoEnabled;
+        elements.autoRecordSwitch.disabled = controlBusy || !autoKnown;
+        elements.autoRecordSwitch.setAttribute(
+          "aria-label",
+          `明天自動錄製，目前${autoKnown ? (autoEnabled ? "開啟" : "關閉") : "狀態未知"}`
+        );
+        elements.startRecordButton.disabled = controlBusy || !recordingKnown || recording;
+        elements.stopRecordButton.disabled = controlBusy || !recordingKnown || !recording;
+
+        if (
+          autoKnown &&
+          recordingKnown &&
+          elements.recordControlFeedback.dataset.source === "connection"
+        ) {
+          setControlFeedback("");
+        }
+      }
+
       function renderHealth(state, service) {
         const recording = state.recording === true;
         const recordPath = safeText(state.record_path);
@@ -2061,6 +2480,7 @@
         elements.serviceStatus.textContent = serviceLabel(service, state);
         elements.serviceDot.className = `service-dot ${service}`;
         elements.serviceDot.setAttribute("aria-label", elements.serviceStatus.textContent);
+        renderRecordControl(state);
         renderHealth(state, service);
         setCount(elements.countFake, counts.suspected_fake);
         setCount(elements.countHeld, counts.locked_held);
@@ -2082,8 +2502,11 @@
           elements.connectionNote.textContent = "API 已連線・每秒更新";
           elements.connectionNote.className = "connection-note";
         }
-        renderLockedStocks(stocks);
-        renderAnomalies(stocks, state.anomaly_thresholds);
+        renderFakeGradeStocks(
+          stocks,
+          state.date,
+          state.fake_grade_thresholds
+        );
         renderStocks(stocks);
         renderAlerts(alerts);
         updateClock();
@@ -2094,6 +2517,8 @@
         elements.statusPrimary.className = "status-cell status-primary error";
         elements.serviceStatus.textContent = "連線中斷・正在重試";
         elements.serviceDot.className = "service-dot error";
+        renderRecordControl(null);
+        setControlFeedback("無法讀取錄製狀態，正在重試。", "error", "connection");
         elements.recordingCell.className = "health-cell recording-cell";
         elements.recordingStatus.textContent = "錄製狀態未知";
         elements.recordingDot.className = "recording-dot";
@@ -2108,16 +2533,65 @@
         elements.connectionNote.className = "connection-note offline";
       }
 
+      async function fetchCurrentState() {
+        const response = await fetch("/api/state", {
+          cache: "no-store",
+          headers: { "Accept": "application/json" }
+        });
+        if (!response.ok) throw new Error(`無法讀取狀態 (${response.status})`);
+        const state = await response.json();
+        renderState(state);
+        return state;
+      }
+
+      async function postRecordControl(body, pendingMessage, successMessage) {
+        if (controlBusy) return;
+        controlBusy = true;
+        renderRecordControl(currentState);
+        setControlFeedback(pendingMessage);
+        let requestAccepted = false;
+
+        try {
+          const response = await fetch("/api/control", {
+            method: "POST",
+            cache: "no-store",
+            headers: {
+              "Accept": "application/json",
+              "Content-Type": "application/json"
+            },
+            body: JSON.stringify(body)
+          });
+          let payload = {};
+          try {
+            payload = await response.json();
+          } catch (error) {
+            payload = {};
+          }
+          if (!response.ok) {
+            const message = safeText(
+              payload.error || payload.message,
+              `操作失敗 (${response.status})`
+            );
+            throw new Error(message);
+          }
+          requestAccepted = true;
+          await fetchCurrentState();
+          setControlFeedback(successMessage, "success");
+        } catch (error) {
+          const fallback = requestAccepted
+            ? "操作已送出，但暫時無法確認後端狀態。"
+            : "操作失敗，請稍後再試。";
+          setControlFeedback(safeText(error && error.message, fallback), "error");
+        } finally {
+          controlBusy = false;
+          renderRecordControl(currentState);
+        }
+      }
+
       async function pollState() {
         window.clearTimeout(pollTimer);
         try {
-          const response = await fetch("/api/state", {
-            cache: "no-store",
-            headers: { "Accept": "application/json" }
-          });
-          if (!response.ok) throw new Error(`state request failed: ${response.status}`);
-          const state = await response.json();
-          renderState(state);
+          await fetchCurrentState();
         } catch (error) {
           showConnectionError();
         } finally {
@@ -2134,6 +2608,31 @@
             drawSparkline(canvas, Array.isArray(stock.spark) ? stock.spark : [], status.className);
           });
         }
+      });
+
+      elements.autoRecordSwitch.addEventListener("change", () => {
+        const enabled = elements.autoRecordSwitch.checked;
+        postRecordControl(
+          { action: "set_auto", enabled },
+          `正在${enabled ? "開啟" : "關閉"}明天自動錄製…`,
+          `明天自動錄製已${enabled ? "開啟" : "關閉"}。`
+        );
+      });
+
+      elements.startRecordButton.addEventListener("click", () => {
+        postRecordControl(
+          { action: "start" },
+          "正在啟動今日錄製…",
+          "今日錄製已啟動。"
+        );
+      });
+
+      elements.stopRecordButton.addEventListener("click", () => {
+        postRecordControl(
+          { action: "stop" },
+          "正在停止今日錄製…",
+          "今日錄製已停止。"
+        );
       });
 
       window.setInterval(updateClock, 1000);

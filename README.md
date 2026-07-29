@@ -1,225 +1,120 @@
-# Shioaji 盤前試撮即時偵測器服務
+# 假試撮盤前監控：接手人操作指南
 
-本專案是常駐在本機的即時偵測器服務，不是產生靜態報告的批次工具。服務啟動後會先提供本機網頁並保持待命；到了預設的盤前試撮窗口 08:30–09:00，會自動接上 Shioaji 行情、即時更新偵測狀態。
-
-預設網頁位址：
-
-```text
-http://127.0.0.1:8900/
-```
-
-服務只做行情唯讀登入，不啟用憑證、不選交易帳號，也不下單。
-
-## 1. 系統需求
-
-- Windows 10 或 Windows 11，64 位元。
-- 64 位元 Python 3.12。
-- 第一次安裝 Python 套件時需要網路。
-- 可使用 Shioaji API 的永豐金證券帳號，以及使用者自己的 API key／secret key。
-
-整個專案可以複製到其他資料夾或電腦。請勿直接搬用別台電腦建立的 `.venv`；在新位置重新執行 `setup.bat` 即可。
-
-## 2. 初始化與填寫金鑰
-
-1. 將整個專案資料夾複製到接手人的電腦。
-2. 雙擊 `setup.bat`。
-3. 安裝程式會在專案資料夾建立 `.venv`，並安裝 `requirements.txt`。
-4. 若專案內尚無 `.env`，安裝程式會從 `.env.example` 建立一份。
-5. 用文字編輯器開啟 `.env`，填入接手人自己的資料：
-
-```dotenv
-SHIOAJI_API_KEY=接手人自己的_api_key
-SHIOAJI_SECRET_KEY=接手人自己的_secret_key
-```
-
-不要在等號前後加入多餘空格。若安裝時顯示找不到 Python，請先安裝 64 位元 Python 3.12，並建議在安裝畫面勾選「Add Python to PATH」。
-
-## 3. 啟動即時服務
-
-填妥 `.env` 後，雙擊 `start.bat`。它會：
-
-1. 優先使用本資料夾的 `.venv\Scripts\python.exe`。
-2. 若 `.venv` 不存在，回退到系統的 `python`。
-3. 以 live 模式啟動 `service.py`。
-4. 在畫面提示以瀏覽器開啟 `http://127.0.0.1:8900/`。
-
-命令視窗必須保持開啟。關閉視窗或按 `Ctrl+C` 會停止服務。
-
-服務一啟動就會提供網頁；未進入試撮窗口時顯示待命狀態。預設盤前試撮窗口為台北時間 08:30–09:00，服務會自動準備行情連線並在窗口內即時偵測，09:00 後以 snapshot 收口判定，再由同一個登入、訂閱與程序續錄到約 09:05，之後繼續待命下一個窗口。
-
-> 目前的日期判斷以平日為主，不包含台灣證券交易所休市日或補交易日行事曆。
-
-### Live 自動錄製與誠實狀態
-
-Live 模式預設由同一個 `service.py` 同時提供 PORT 8900 UI 與每日完整落地。日期資料夾不存在時會自動建立，產物為：
-
-- `data\history\YYYYMMDD\auction_YYYYMMDD.jsonl` 與 `.meta.json`：08:30–09:00 盤前 BidAsk，加上 09:00 後全宇宙 snapshot。
-- `data\history\YYYYMMDD\auction_YYYYMMDD_postopen.jsonl` 與 `.meta.json`：09:00–約 09:05 的 BidAsk 續錄，加上 09:05 後全宇宙 snapshot。
-- `data\history\YYYYMMDD\result_YYYYMMDD.json`：直接將既有 `AuctionDetector` 在開盤 snapshot 後的判定原子落地；不另改判定邏輯。
-
-主檔與續錄採 append，服務若在窗口內重啟會保留先前已寫事件；meta 與 result 在收口時更新。這些檔案可供後續 replay、掃描與分析，不會因即時窗口結束而遺失。
-
-### Telegram 盤前判定通知
-
-請先建立一個新的 Telegram bot，再把該新 bot 的 token 與接收對象 chat
-id 填入專案根目錄 `.env`；不要複製或沿用其他專案的憑證：
-
-```dotenv
-TELEGRAM_BOT_TOKEN=使用者之後建立的新_bot_token
-TELEGRAM_CHAT_ID=使用者之後指定的_chat_id
-```
-
-通知不另設固定 09:00 排程。只有 live `preopen` 在開盤 snapshot 收口、
-`result_YYYYMMDD.json` 成功落地後才會立即送出，正常約在 09:00:10；
-此時訊息才能比較試撮曾鎖漲停與實際開盤結果。Replay、`preclose` 與
-`--no-record` 不會發送。
-
-兩個 Telegram 欄位保持空白是正常未設定狀態，服務會印出
-`TEL 憑證未設定，略過發送` 並繼續錄製與判定。網路或 Telegram API
-失敗也只會留下不含憑證的失敗紀錄，不會中斷主流程。
-
-`recorder.py` 只保留為獨立診斷工具，不是正式排程入口；它的 `--smoke`
-可驗證登入、訂閱、callback、snapshot 與清理。正式每日錄製一律由
-`service.py` 協調 UI 與上述三組日檔。
-
-如明確不需要落地，可用 `--no-record` 關閉：
-
-```powershell
-python service.py --no-record
-```
-
-Replay 模式預設只讀取既有檔案，不會再次寫入或覆蓋錄製檔。只有明確提供 `--record-out` 才會把 replay 事件另存到指定路徑；例如可寫入系統暫存目錄，再交給 scanner 驗證：
-
-```powershell
-python service.py --replay data\history\YYYYMMDD\auction_YYYYMMDD.jsonl --speed 50 --record-out "$env:TEMP\live_rec.jsonl" --result-out "$env:TEMP\live_rec_detector_result.json"
-python scanner.py --in "$env:TEMP\live_rec.jsonl" --out "$env:TEMP\live_rec_scanner_result.json"
-```
-
-`scanner.py` 未提供 `--in` 時，預設讀取今日的 `data\history\YYYYMMDD\auction_YYYYMMDD.jsonl`；未提供 `--out` 時，會依輸入資料的日期將結果寫成 `data\history\YYYYMMDD\result_YYYYMMDD.json`。因此掃描指定歷史檔時可只寫：
-
-```powershell
-python scanner.py --in data\history\20260724\auction_20260724.jsonl
-```
-
-完成 replay 後可按 `Ctrl+C` 停止服務。要在不登入 Shioaji、也不碰 `data\` 的情況下自動驗證錄製 schema、scanner/replay 相容性與狀態契約，也可直接執行：
-
-```powershell
-python tests\test_service_record.py
-```
-
-網頁與 `/api/state` 顯示的是實際連線與資料流狀況，不是固定文案：
-
-- `live`：登入成功、實際訂閱完成，而且窗口內持續收到真實市場事件。
-- `degraded`：已登入並訂閱，但窗口內超過容許秒數沒有新事件，代表資料可能停流；預設門檻為 10 秒，可用 `--stale-after-sec` 調整。
-- `error`：登入失敗或實際訂閱未達應訂閱檔數。
-
-`/api/state` 同時提供 `recording`、`record_path`、`record_count`、`last_event_age_sec`、`login_ok`、`subscribe_ok`，可直接確認是否正在錄製、已落地筆數、最後事件距今秒數，以及登入／訂閱是否成功。窗口外仍可能顯示 `idle`、`armed`、`closed`；Replay 則顯示 `replay`。
-
-## 4. Replay 離線測試
-
-Replay 模式會讀取既有的試撮 JSONL，不登入 Shioaji。請在專案資料夾開啟 PowerShell，執行：
-
-```powershell
-.\.venv\Scripts\python.exe service.py --replay data\history\YYYYMMDD\auction_YYYYMMDD.jsonl --speed 20
-```
-
-將 `YYYYMMDD` 換成實際檔案日期，`--speed` 是重播加速倍率。Replay 啟動後同樣用瀏覽器開啟：
+這是一套 Windows 可攜式盤前資料錄製系統。安裝後，使用者只需雙擊
+啟動檔，即可在背景啟動服務並開啟當日前端：
 
 ```text
 http://127.0.0.1:8900/
 ```
 
-若不使用專案虛擬環境，也可改用：
+## 最短操作路徑
+
+### 1. 第一次使用：安裝環境
+
+雙擊 `安裝環境.bat`。英文檔名的相同入口是 `install.bat`。
+
+安裝程式會依序：
+
+1. 在本資料夾建立或沿用 `.venv`。
+2. 升級 pip。
+3. 安裝 `requirements.txt`。
+4. 註冊 Windows 週一至週五 08:25 自動錄製排程。
+5. 再查詢一次排程，確認它確實存在。
+
+安裝可安全重複執行。安裝完成時會明確顯示成功；任何步驟失敗也會顯示
+失敗原因與處理方向。
+
+電腦需已安裝 64 位元 Python 3.12。若找不到 Python，請先安裝並勾選
+`Add Python to PATH`，再重新執行安裝檔。
+
+### 2. 每次要打開前端：一鍵啟動
+
+雙擊 `一鍵啟動.vbs`。英文檔名的相同入口是 `launch.vbs`。
+
+啟動器會：
+
+- 使用本資料夾的 `.venv\Scripts\pythonw.exe`。
+- 以背景模式執行 `service.py --host 127.0.0.1 --port 8900`。
+- 全程以本資料夾為工作目錄，因此會讀取同資料夾內的 `.env`。
+- 等待服務可用後，自動用預設瀏覽器開啟前端。
+- 若服務原本已在執行，直接沿用，不會再開第二份。
+
+VBS 是正式的一鍵入口，不會出現黑色終端機視窗。`start.bat`、`setup.bat`
+保留作為舊版英文相容入口；日常使用請優先點 VBS。
+
+### 3. 前端錄製控制
+
+前端的「錄製控制」會顯示後端真實狀態，可進行：
+
+- 開啟或關閉「明天起自動錄製」。
+- 停止今日正在執行的錄製。
+- 在合理錄製時間內立即開始今日錄製。
+
+按下控制後，畫面會重新向 `/api/state` 取得狀態；不是只改畫面文字。
+
+## 每日自動錄製
+
+安裝程序會呼叫：
 
 ```powershell
-python service.py --replay data\history\YYYYMMDD\auction_YYYYMMDD.jsonl --speed 20
+.\schedule_morning.ps1 -Mode Register -Port 8900
 ```
 
-## 5. 開機登入後自動啟動（選用）
+工作排程名稱為「假試撮盤前監控」，週一至週五 08:25 執行。排程本身在
+Windows 工作排程器的背景工作階段執行，之後由 PowerShell 以
+`Start-Process -WindowStyle Hidden` 啟動服務，因此不會跳出錄製終端機。
 
-雙擊 `install_autostart.bat`，會在目前使用者的 Windows「啟動」資料夾建立捷徑，登入後自動呼叫本專案的 `start.bat`。此動作不需要系統管理員權限。
+重要限制：
 
-若專案資料夾改名或搬家，請先雙擊 `uninstall_autostart.bat` 移除舊捷徑，搬移完成後再從新位置執行 `install_autostart.bat`。
+- 08:25 時電腦必須開機，或硬體與 Windows 電源設定允許從睡眠喚醒。
+- 電腦若已完全關機，工作排程無法自行開機。
+- 若錯過時間，排程已設定為電腦恢復可用時補跑；也可雙擊一鍵啟動後，
+  在前端按「立即開始」。
 
-移除自動啟動只會刪除捷徑，不會刪除專案、資料或金鑰檔。
-
-## 6. 盤前排程與定時看門狗
-
-Windows 排程任務 `假試撮盤前監控` 是唯一正式主入口：平日
-08:25 呼叫 `schedule_morning.ps1 -Mode Execute -Port 8900`。腳本只負責
-啟動並健康檢查 `service.py`；同一個 service 程序會保持常駐，同時在
-8900 提供 UI，並產生上述盤前、開盤後續錄與 detector result。若健康的
-service 已存在，Action 會直接沿用，不會重複啟動。重新註冊或查詢可使用：
+手動查詢排程：
 
 ```powershell
-.\schedule_morning.ps1 -Mode Register
 .\schedule_morning.ps1 -Mode Status
 ```
 
-註冊流程會明確允許使用電池時啟動、不因切換到電池而停止、喚醒電腦
-執行，並在錯過 08:25 後儘快補啟動。Windows 使用者仍須保持登入
-（鎖定畫面可以），因為本機 UI 任務採目前使用者的互動式登入模式。
-
-在非盤前時段手動觸發同一 Action，service 會先提供 UI 並待命到下一個
-平日窗口；Action 在 `/api/state` 健康後即以 0 結束，service 程序不會
-跟著結束。驗收時可暫時用 `-Port 8901` 註冊與實跑，確認後再以預設
-8900 重新註冊。
-
-### 選用的 UI 服務看門狗
-
-`scheduler.py` 不是正式主入口，也不應與 Windows 排程同時常駐。它只保留
-為沒有 Task Scheduler 時的手動看門狗備援：平日設定時間檢查本機 PORT
-8900，未監聽才啟動同一個 `service.py`。正式環境請使用
-`schedule_morning.ps1` 註冊的 Windows 排程。
-
-查看下一次檢查時點，不啟動服務：
+如需移除每日排程：
 
 ```powershell
-.\.venv\Scripts\python.exe scheduler.py --dry
+.\schedule_morning.ps1 -Mode Unregister
 ```
 
-立即確保服務啟動一次：
+## 金鑰與交付安全
 
-```powershell
-.\.venv\Scripts\python.exe scheduler.py --once
+本交付資料夾已內建執行所需的 `.env`。安裝器與啟動器只確認該檔案存在，
+不會讀取、顯示或複製其中內容。
+
+**`.env` 含真實密鑰，不得外流。**
+
+- 不要把整個資料夾傳給未授權的人。
+- 不要把 `.env` 貼到聊天、郵件、問題回報或螢幕截圖。
+- 不要提交 `.env` 到 Git。
+- 問題回報只需提供錯誤訊息；任何密鑰欄位都要遮蔽。
+
+## 常見問題
+
+### 雙擊一鍵啟動後未開啟前端
+
+先確認已成功執行 `安裝環境.bat`，且以下檔案存在：
+
+```text
+.venv\Scripts\pythonw.exe
+service.py
+.env
 ```
 
-讓看門狗保持常駐，預設於平日 08:20 檢查：
+啟動器會等待最多 30 秒。若後端仍未通過
+`http://127.0.0.1:8900/api/state` 健康檢查，會顯示不含金鑰的錯誤對話框。
 
-```powershell
-.\.venv\Scripts\python.exe scheduler.py
-```
+### 8900 埠已被占用
 
-需要調整檢查時間時可使用：
+若占用者正是本系統，啟動器會沿用現有服務。若是其他程式，請先關閉該
+程式，再重新雙擊 `一鍵啟動.vbs`。
 
-```powershell
-.\.venv\Scripts\python.exe scheduler.py --at 08:15
-```
+### 安裝一半失敗
 
-## 7. 金鑰安全
-
-`.env` 內含真實 Shioaji 金鑰，不可上傳到 Git、寄到群組、貼到問題回報或放進交付包。
-
-**把資料夾交給別人以前，務必刪除自己的 `.env`。**
-
-交付包只保留不含金鑰的 `.env.example`。接手人應執行 `setup.bat` 建立新的 `.env`，並填入自己的金鑰；不要沿用、複製或傳送原持有人的金鑰。
-
-## 8. 常見問題
-
-### 瀏覽器無法開啟
-
-先確認啟動服務的命令視窗仍在執行，並查看畫面是否出現 `HTTP 啟動 FAILED`。PORT 8900 若已被其他程式占用，服務會無法啟動。
-
-### Live 模式登入失敗
-
-確認 `.env` 位於專案根目錄，變數名稱正確，且填入的是目前使用者自己的有效 API key 與 secret key。Replay 成功不代表真實金鑰一定有效。
-
-### 如何直接驗證偵測器單元測試
-
-在專案根目錄執行：
-
-```powershell
-python tests\test_detector.py
-```
-
-此測試不需設定 `PYTHONPATH`，也不會登入 Shioaji。
+不需刪除 `.venv`；修正網路或 Python 問題後直接重跑安裝檔即可。
