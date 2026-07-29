@@ -25,6 +25,41 @@ function Resolve-Python {
     return $pythonCommand.Source
 }
 
+function Get-ServiceStateClassification {
+    param(
+        [AllowNull()]
+        [object]$State,
+        [bool]$ResponseReceived = $true
+    )
+
+    if (-not $ResponseReceived) {
+        return "none"
+    }
+    if ($null -eq $State) {
+        return "foreign"
+    }
+
+    $statusProperty = $State.PSObject.Properties["service_status"]
+    if ($null -eq $statusProperty) {
+        return "foreign"
+    }
+
+    $serviceStatus = ([string]$statusProperty.Value).Trim().ToLowerInvariant()
+    $recordingProperty = $State.PSObject.Properties["recording"]
+    $isRecording = (
+        $null -ne $recordingProperty `
+        -and $recordingProperty.Value -is [bool] `
+        -and $recordingProperty.Value
+    )
+    if (
+        $serviceStatus -in @("live", "armed") `
+        -or $isRecording
+    ) {
+        return "live-recorder"
+    }
+    return "ours-not-live"
+}
+
 function Test-ServiceHealth {
     param([int]$HealthPort)
 
@@ -33,24 +68,295 @@ function Test-ServiceHealth {
             -Uri "http://127.0.0.1:$HealthPort/api/state" `
             -TimeoutSec 2 `
             -ErrorAction Stop
-        return (
-            $null -ne $state `
-            -and $null -ne $state.session `
-            -and $null -ne $state.counts
-        )
+        $classification = Get-ServiceStateClassification `
+            -State $state `
+            -ResponseReceived $true
+        $statusProperty = if ($null -ne $state) {
+            $state.PSObject.Properties["service_status"]
+        }
+        else {
+            $null
+        }
+        $recordingProperty = if ($null -ne $state) {
+            $state.PSObject.Properties["recording"]
+        }
+        else {
+            $null
+        }
+        return [pscustomobject]@{
+            Classification = $classification
+            ServiceStatus = if ($null -ne $statusProperty) {
+                [string]$statusProperty.Value
+            }
+            else {
+                $null
+            }
+            Recording = (
+                $null -ne $recordingProperty `
+                -and $recordingProperty.Value -is [bool] `
+                -and $recordingProperty.Value
+            )
+            Detail = $null
+        }
     }
     catch {
-        return $false
+        $responseReceived = $null -ne $_.Exception.Response
+        return [pscustomobject]@{
+            Classification = Get-ServiceStateClassification `
+                -State $null `
+                -ResponseReceived $responseReceived
+            ServiceStatus = $null
+            Recording = $false
+            Detail = $_.Exception.Message
+        }
     }
 }
 
-function Start-CoordinatedService {
-    if (Test-ServiceHealth -HealthPort $Port) {
-        Write-Output (
-            "service.py 已在 127.0.0.1:$Port 提供 UI；" +
-            "沿用同一程序負責當日錄製。"
+function Get-ListeningProcessIds {
+    param([int]$ListenPort)
+
+    if ($null -eq (
+        Get-Command "Get-NetTCPConnection" -ErrorAction SilentlyContinue
+    )) {
+        throw "無法使用 Get-NetTCPConnection 安全判定 PORT $ListenPort 的擁有者"
+    }
+    try {
+        return @(
+            Get-NetTCPConnection `
+                -LocalPort $ListenPort `
+                -State Listen `
+                -ErrorAction Stop |
+                Where-Object { $_.OwningProcess -gt 0 } |
+                Select-Object -ExpandProperty OwningProcess -Unique
         )
-        return
+    }
+    catch {
+        if (
+            $_.FullyQualifiedErrorId `
+            -like "CmdletizationQuery_NotFound,Get-NetTCPConnection"
+        ) {
+            return @()
+        }
+        throw (
+            "無法安全查詢 PORT $ListenPort 的監聽行程：" +
+            $_.Exception.Message
+        )
+    }
+}
+
+function Test-ProcessIsDescendantOrSelf {
+    param(
+        [int]$CandidateProcessId,
+        [int]$AncestorProcessId
+    )
+
+    $currentProcessId = $CandidateProcessId
+    $visitedProcessIds = @{}
+    for ($depth = 0; $depth -lt 16; $depth++) {
+        if ($currentProcessId -eq $AncestorProcessId) {
+            return $true
+        }
+        if (
+            $currentProcessId -le 0 `
+            -or $visitedProcessIds.ContainsKey($currentProcessId)
+        ) {
+            return $false
+        }
+        $visitedProcessIds[$currentProcessId] = $true
+        try {
+            $currentProcess = Get-CimInstance `
+                -ClassName Win32_Process `
+                -Filter "ProcessId = $currentProcessId" `
+                -ErrorAction Stop
+        }
+        catch {
+            throw (
+                "無法確認監聽 PID=$CandidateProcessId 是否由 " +
+                "PID=$AncestorProcessId 啟動：" +
+                $_.Exception.Message
+            )
+        }
+        if ($null -eq $currentProcess) {
+            return $false
+        }
+        $currentProcessId = [int]$currentProcess.ParentProcessId
+    }
+    return $false
+}
+
+function Stop-OursNotLiveListener {
+    param(
+        [int]$ListenPort,
+        [AllowEmptyString()]
+        [string]$ServiceStatus
+    )
+
+    $displayStatus = if ([string]::IsNullOrWhiteSpace($ServiceStatus)) {
+        "<empty>"
+    }
+    else {
+        $ServiceStatus
+    }
+    $listenerPids = @(Get-ListeningProcessIds -ListenPort $ListenPort)
+    if ($listenerPids.Count -eq 0) {
+        return [pscustomobject]@{
+            Action = "already-released"
+            ProcessId = $null
+            ServiceStatus = $displayStatus
+        }
+    }
+    if ($listenerPids.Count -ne 1) {
+        $message = (
+            "LOUD：PORT $ListenPort 的本系統 $displayStatus 回應對應到多個" +
+            "監聽 PID（$($listenerPids -join ',')），無法安全收回；" +
+            "今日錄製未啟動。"
+        )
+        Write-Warning $message
+        throw $message
+    }
+
+    $expectedPid = [int]$listenerPids[0]
+    $confirmedHealth = Test-ServiceHealth -HealthPort $ListenPort
+    $confirmedPids = @(Get-ListeningProcessIds -ListenPort $ListenPort)
+    if ($confirmedHealth.Classification -eq "live-recorder") {
+        return [pscustomobject]@{
+            Action = "became-live"
+            ProcessId = $expectedPid
+            ServiceStatus = $confirmedHealth.ServiceStatus
+        }
+    }
+    if (
+        $confirmedHealth.Classification -eq "none" `
+        -and $confirmedPids.Count -eq 0
+    ) {
+        return [pscustomobject]@{
+            Action = "already-released"
+            ProcessId = $null
+            ServiceStatus = $displayStatus
+        }
+    }
+    if ($confirmedHealth.Classification -ne "ours-not-live") {
+        $message = (
+            "LOUD：PORT $ListenPort 在收回前重新分類為 " +
+            "$($confirmedHealth.Classification)，不會終止 PID；" +
+            "今日錄製未啟動。"
+        )
+        Write-Warning $message
+        throw $message
+    }
+    if (
+        $confirmedPids.Count -ne 1 `
+        -or [int]$confirmedPids[0] -ne $expectedPid
+    ) {
+        $message = (
+            "LOUD：PORT $ListenPort 的監聽 PID 在收回前已變更" +
+            "（原=$expectedPid；現=$($confirmedPids -join ',')），" +
+            "不會終止不明行程；今日錄製未啟動。"
+        )
+        Write-Warning $message
+        throw $message
+    }
+
+    $listenerProcess = Get-Process -Id $expectedPid -ErrorAction Stop
+    $finalPids = @(Get-ListeningProcessIds -ListenPort $ListenPort)
+    if (
+        $finalPids.Count -ne 1 `
+        -or [int]$finalPids[0] -ne $expectedPid
+    ) {
+        $message = (
+            "LOUD：PORT $ListenPort 的監聽 PID 在終止前再次變更" +
+            "（預期=$expectedPid；現=$($finalPids -join ',')），" +
+            "不會終止不明行程；今日錄製未啟動。"
+        )
+        Write-Warning $message
+        throw $message
+    }
+    $listenerProcess | Stop-Process -Force -ErrorAction Stop
+
+    $releaseDeadline = (Get-Date).AddSeconds(10)
+    while ((Get-Date) -lt $releaseDeadline) {
+        $remainingPids = @(
+            Get-ListeningProcessIds -ListenPort $ListenPort
+        )
+        if ($remainingPids.Count -eq 0) {
+            return [pscustomobject]@{
+                Action = "reclaimed"
+                ProcessId = $expectedPid
+                ServiceStatus = $confirmedHealth.ServiceStatus
+            }
+        }
+        Start-Sleep -Milliseconds 200
+    }
+
+    $message = (
+        "LOUD：已終止本系統 $displayStatus 行程 PID=$expectedPid，" +
+        "但 PORT $ListenPort 在 10 秒內未釋放；今日錄製未啟動。"
+    )
+    Write-Warning $message
+    throw $message
+}
+
+function Start-CoordinatedService {
+    $initialHealth = Test-ServiceHealth -HealthPort $Port
+    $reclaimedStatus = $null
+    switch ($initialHealth.Classification) {
+        "live-recorder" {
+            Write-Output (
+                "service.py 已在 127.0.0.1:$Port live 錄製" +
+                "（status=$($initialHealth.ServiceStatus)，" +
+                "recording=$($initialHealth.Recording)）；不重複啟動。"
+            )
+            return
+        }
+        "ours-not-live" {
+            $reclaimResult = Stop-OursNotLiveListener `
+                -ListenPort $Port `
+                -ServiceStatus $initialHealth.ServiceStatus
+            switch ($reclaimResult.Action) {
+                "became-live" {
+                    Write-Output (
+                        "service.py 在收回前已轉為 live 錄製" +
+                        "（PID=$($reclaimResult.ProcessId)，" +
+                        "status=$($reclaimResult.ServiceStatus)）；" +
+                        "不重複啟動。"
+                    )
+                    return
+                }
+                "already-released" {
+                    Write-Output (
+                        "PORT $Port 上的本系統 " +
+                        "$($reclaimResult.ServiceStatus) 非 live 錄製服務" +
+                        "已自行釋放；將啟動真錄製。"
+                    )
+                }
+                "reclaimed" {
+                    $reclaimedStatus = $reclaimResult.ServiceStatus
+                    Write-Output (
+                        "PORT $Port 上為本系統 $reclaimedStatus " +
+                        "非 live 錄製，已收回" +
+                        "（PID=$($reclaimResult.ProcessId)）；" +
+                        "將啟動真錄製。"
+                    )
+                }
+                default {
+                    throw "未知的 PORT 收回結果：$($reclaimResult.Action)"
+                }
+            }
+        }
+        "foreign" {
+            $message = (
+                "LOUD：PORT $Port 被非本系統程式占用，" +
+                "無法啟動今日錄製，請釋放 PORT $Port。"
+            )
+            Write-Warning $message
+            throw $message
+        }
+        "none" {
+            # 沒有既有服務，直接走正常啟動流程。
+        }
+        default {
+            throw "未知的服務健康分類：$($initialHealth.Classification)"
+        }
     }
 
     $pythonPath = Resolve-Python
@@ -89,7 +395,48 @@ function Start-CoordinatedService {
                 "（exit=$($process.ExitCode)）"
             )
         }
-        if (Test-ServiceHealth -HealthPort $Port) {
+        $launchHealth = Test-ServiceHealth -HealthPort $Port
+        if (
+            $launchHealth.Classification -in @(
+                "live-recorder",
+                "ours-not-live"
+            )
+        ) {
+            $launchListenerPids = @(
+                Get-ListeningProcessIds -ListenPort $Port
+            )
+            $launchListenerPid = if ($launchListenerPids.Count -eq 1) {
+                [int]$launchListenerPids[0]
+            }
+            else {
+                0
+            }
+            $listenerBelongsToLaunch = (
+                $launchListenerPids.Count -eq 1 `
+                -and (
+                    Test-ProcessIsDescendantOrSelf `
+                        -CandidateProcessId $launchListenerPid `
+                        -AncestorProcessId $process.Id
+                )
+            )
+            if (
+                -not $listenerBelongsToLaunch
+            ) {
+                if (-not $process.HasExited) {
+                    Stop-Process `
+                        -Id $process.Id `
+                        -Force `
+                        -ErrorAction SilentlyContinue
+                }
+                $message = (
+                    "LOUD：PORT $Port 的本系統回應不是由新啟動的 " +
+                    "PID=$($process.Id) 或其子行程提供" +
+                    "（監聽 PID=$($launchListenerPids -join ',')）；" +
+                    "已停止新行程，今日錄製未啟動。"
+                )
+                Write-Warning $message
+                throw $message
+            }
             Set-Content `
                 -LiteralPath $pidPath `
                 -Value $process.Id `
@@ -97,9 +444,33 @@ function Start-CoordinatedService {
             Write-Output (
                 "service.py 啟動成功：PID=$($process.Id)；" +
                 "UI=http://127.0.0.1:$Port/；" +
-                "live 錄製=data\history\YYYYMMDD\"
+                "分類=$($launchHealth.Classification)；" +
+                "status=$($launchHealth.ServiceStatus)；" +
+                "recording=$($launchHealth.Recording)；" +
+                "監聽 PID=$launchListenerPid；" +
+                "錄製路徑=data\history\YYYYMMDD\"
             )
+            if ($null -ne $reclaimedStatus) {
+                Write-Output (
+                    "PORT $Port 上原為 $reclaimedStatus 非 live 錄製，" +
+                    "已收回並啟動真錄製服務。"
+                )
+            }
             return
+        }
+        if ($launchHealth.Classification -eq "foreign") {
+            if (-not $process.HasExited) {
+                Stop-Process `
+                    -Id $process.Id `
+                    -Force `
+                    -ErrorAction SilentlyContinue
+            }
+            $message = (
+                "LOUD：啟動等待期間 PORT $Port 出現非本系統回應；" +
+                "已停止新行程，今日錄製未啟動。"
+            )
+            Write-Warning $message
+            throw $message
         }
         Start-Sleep -Milliseconds 250
     }
@@ -109,7 +480,9 @@ function Start-CoordinatedService {
     }
     throw (
         "service.py 已啟動但 $LaunchTimeoutSeconds 秒內未通過 " +
-        "http://127.0.0.1:$Port/api/state 健康檢查"
+        "live 錄製健康檢查；最後分類=$($launchHealth.Classification)，" +
+        "status=$($launchHealth.ServiceStatus)，" +
+        "recording=$($launchHealth.Recording)"
     )
 }
 
@@ -128,6 +501,10 @@ function Set-ReliableTaskSettings {
         -ErrorAction Stop | Out-Null
 }
 
+if ($MyInvocation.InvocationName -eq ".") {
+    return
+}
+
 if ($Mode -eq "Execute") {
     try {
         if (-not (Test-Path -LiteralPath $ServicePath -PathType Leaf)) {
@@ -138,7 +515,7 @@ if ($Mode -eq "Execute") {
         exit 0
     }
     catch {
-        Write-Error $_
+        Write-Error $_ -ErrorAction Continue
         exit 2
     }
 }
@@ -190,6 +567,19 @@ switch ($Mode) {
         if ($LASTEXITCODE -ne 0) {
             throw "查詢排程失敗（schtasks exit=$LASTEXITCODE）"
         }
+        $health = Test-ServiceHealth -HealthPort $Port
+        $statusText = if (
+            [string]::IsNullOrWhiteSpace($health.ServiceStatus)
+        ) {
+            "<none>"
+        }
+        else {
+            $health.ServiceStatus
+        }
+        Write-Output (
+            "服務健康分類=$($health.Classification)；" +
+            "service_status=$statusText；recording=$($health.Recording)"
+        )
     }
     "Unregister" {
         & schtasks.exe /Delete /TN $TaskName /F
