@@ -32,17 +32,34 @@ if not exist "%ENV_FILE%" (
 )
 
 if exist "%VENV_PYTHON%" (
-    echo [1/4] Existing .venv found. Reusing it.
-) else (
-    echo [1/4] Creating the folder-local .venv ...
-    call :create_venv
+    "%VENV_PYTHON%" -c "import sys" >nul 2>nul && (
+        echo [1/4] Existing .venv found. Reusing it.
+        goto :venv_ready
+    )
+    echo [1/4] Existing .venv is unusable. Rebuilding it ...
+    call :remove_venv
     if errorlevel 1 (
-        echo [FAILED] Unable to create .venv.
-        echo Install 64-bit Python 3.12 with Add Python to PATH, then retry.
+        echo [FAILED] Unable to remove the unusable .venv.
+        goto :failed
+    )
+) else if exist "%VENV_DIR%\" (
+    echo [1/4] Existing .venv is incomplete. Rebuilding it ...
+    call :remove_venv
+    if errorlevel 1 (
+        echo [FAILED] Unable to remove the incomplete .venv.
         goto :failed
     )
 )
 
+echo [1/4] Creating the folder-local .venv ...
+call :create_venv
+if errorlevel 1 (
+    echo [FAILED] Unable to create .venv.
+    echo Install 64-bit Python 3.12 with Add Python to PATH, then retry.
+    goto :failed
+)
+
+:venv_ready
 echo [2/4] Upgrading pip ...
 "%VENV_PYTHON%" -m pip install --upgrade pip
 if errorlevel 1 (
@@ -95,6 +112,12 @@ if errorlevel 1 exit /b 1
 python.exe -m venv "%VENV_DIR%"
 if exist "%VENV_PYTHON%" exit /b 0
 exit /b 1
+
+:remove_venv
+if not exist "%VENV_DIR%\" exit /b 0
+rmdir /s /q "%VENV_DIR%"
+if exist "%VENV_DIR%\" exit /b 1
+exit /b 0
 
 :workdir_failed
 echo [FAILED] Cannot switch to the system folder.

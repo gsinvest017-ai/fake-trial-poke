@@ -20,6 +20,7 @@ import json
 import os
 import queue
 import signal
+import shutil
 import sys
 import threading
 import time
@@ -51,6 +52,7 @@ LOGIN_RETRY_SECONDS = 30.0
 DEFAULT_STALE_AFTER_SECONDS = 10.0
 TELEGRAM_NOTIFY_DEADLINE_SECONDS = 60.0
 TODAY_RECORDING_SUCCESS_THRESHOLD = 100
+HISTORY_RETENTION_DAYS = 3
 
 
 def _default_port() -> int:
@@ -112,6 +114,68 @@ def relative_path(value: str | Path) -> Path:
     if not path.is_absolute():
         path = BASE_DIR / path
     return path.resolve()
+
+
+def prune_history(
+    history_dir: Path | None = None,
+    retention_days: int | None = None,
+) -> list[str]:
+    """只回收 history 直屬的 YYYYMMDD 日期資料夾。"""
+    root = Path(history_dir) if history_dir is not None else HISTORY_DIR
+    keep_count = (
+        HISTORY_RETENTION_DAYS
+        if retention_days is None
+        else retention_days
+    )
+    if keep_count < 1:
+        raise ValueError("history retention days 必須大於 0")
+    if not root.exists():
+        return []
+
+    resolved_root = root.resolve()
+    date_dirs: list[Path] = []
+    try:
+        children = list(root.iterdir())
+    except OSError as exc:
+        print(
+            f"歷史資料回收 FAILED（{type(exc).__name__}）",
+            flush=True,
+        )
+        return []
+    for child in children:
+        name = child.name
+        if (
+            len(name) != 8
+            or not name.isascii()
+            or not name.isdigit()
+            or not child.is_dir()
+            or child.is_symlink()
+        ):
+            continue
+        try:
+            if child.resolve().parent != resolved_root:
+                continue
+        except OSError:
+            continue
+        date_dirs.append(child)
+
+    deleted: list[str] = []
+    for old_dir in sorted(date_dirs, key=lambda path: path.name)[:-keep_count]:
+        try:
+            shutil.rmtree(old_dir)
+        except OSError as exc:
+            print(
+                "歷史資料回收 FAILED："
+                f"日期={old_dir.name}（{type(exc).__name__}）",
+                flush=True,
+            )
+            continue
+        deleted.append(old_dir.name)
+        print(
+            f"歷史資料回收：已刪除日期={old_dir.name}",
+            flush=True,
+        )
+    return deleted
 
 
 def default_live_record_path(recording_at: datetime) -> Path:
@@ -2176,6 +2240,8 @@ def live_worker(
                     record_out=record_out,
                     result_out=result_out,
                 )
+                if completed_a_window:
+                    prune_history()
                 if control is not None:
                     control.end_session(session_stop)
                 break
@@ -2398,6 +2464,7 @@ def main(argv: list[str] | None = None) -> int:
         source_name = "auction-replay-source"
         mode_label = f"replay={input_path.name}；speed={args.speed:g}"
     else:
+        prune_history()
         start_clock, end_clock = default_clock(args.session)
         if args.start is not None and args.end is not None:
             start_clock, end_clock = args.start, args.end
