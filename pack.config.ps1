@@ -47,15 +47,16 @@ $PyiExtraArgs = @(
 )
 
 $PythonExe = "C:\Users\User\fake-trial-poke\系統檔案\.venv\Scripts\python.exe"
+$env:PATH = "$(Split-Path -Parent $PythonExe);$env:PATH"
 
 # Missing Keyguard must fail the build; the runtime fallback is intentionally
 # fail-open so a packaging mistake cannot lock paying customers out.
 $RequireNonEditable = @("keyguard")
 
 $PostBuildCheck = @'
-& 'C:\Users\User\fake-trial-poke\系統檔案\.venv\Scripts\python.exe' -m keyguard.packagecheck '{dist}' --email-env FAKE_TRIAL_POKE_LICENCE_EMAIL
+python -m keyguard.packagecheck '{dist}' --email-env FAKE_TRIAL_POKE_LICENCE_EMAIL
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-& 'C:\Users\User\fake-trial-poke\系統檔案\.venv\Scripts\python.exe' 'C:\Users\User\gs-app-pack\scripts\smoke_launch.py' '{dist}' --timeout 90
+python 'C:\Users\User\gs-app-pack\scripts\smoke_launch.py' '{dist}' --timeout 90
 '@
 
 $InstallerRequiresGh = $false

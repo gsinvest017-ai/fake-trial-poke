@@ -2,6 +2,8 @@ build/
 dist/
 static/
 *.spec
+installer.iss
+release-build.*.log
 
 # Local licence delivery material must never be published.
 delivery/
