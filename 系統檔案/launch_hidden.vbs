@@ -13,6 +13,7 @@ Dim serviceUrl
 Dim stateUrl
 Dim commandLine
 Dim launchResult
+Dim launchTimeoutSeconds
 
 Set fso = CreateObject("Scripting.FileSystemObject")
 Set shell = CreateObject("WScript.Shell")
@@ -24,6 +25,7 @@ servicePath = fso.BuildPath(projectDir, "service.py")
 envPath = fso.BuildPath(projectDir, ".env")
 serviceUrl = "http://127.0.0.1:8900/"
 stateUrl = "http://127.0.0.1:8900/api/state"
+launchTimeoutSeconds = 45
 
 If Not fso.FileExists(pythonwPath) Then
     MsgBox "Python environment is not installed. Run install.bat first.", _
@@ -55,8 +57,9 @@ If Not IsServiceReady(stateUrl) Then
         WScript.Quit 4
     End If
 
-    If Not WaitForService(stateUrl, 30) Then
-        MsgBox "The service did not become ready within 30 seconds." & vbCrLf & _
+    If Not WaitForService(stateUrl, launchTimeoutSeconds) Then
+        MsgBox "The service did not become ready within " & _
+            CStr(launchTimeoutSeconds) & " seconds." & vbCrLf & _
             "Run install.bat again and check the installation messages.", _
             vbCritical, "Preopen Recorder"
         WScript.Quit 5

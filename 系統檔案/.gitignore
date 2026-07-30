@@ -3,6 +3,7 @@
 .scheduler_state.json
 .scheduler_state.json.tmp
 .scheduler.lock
+.install_complete
 log/
 __pycache__/
 *.pyc
