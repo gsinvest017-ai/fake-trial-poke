@@ -487,18 +487,91 @@ function Start-CoordinatedService {
 }
 
 function Set-ReliableTaskSettings {
-    $registeredTask = Get-ScheduledTask `
-        -TaskName $TaskName `
-        -ErrorAction Stop
-    $settings = $registeredTask.Settings
-    $settings.DisallowStartIfOnBatteries = $false
-    $settings.StopIfGoingOnBatteries = $false
-    $settings.WakeToRun = $true
-    $settings.StartWhenAvailable = $true
-    Set-ScheduledTask `
-        -TaskName $TaskName `
-        -Settings $settings `
-        -ErrorAction Stop | Out-Null
+    $getScheduledTask = Get-Command `
+        "Get-ScheduledTask" `
+        -ErrorAction SilentlyContinue
+    $setScheduledTask = Get-Command `
+        "Set-ScheduledTask" `
+        -ErrorAction SilentlyContinue
+    if (
+        $null -ne $getScheduledTask `
+        -and $null -ne $setScheduledTask
+    ) {
+        $registeredTask = Get-ScheduledTask `
+            -TaskName $TaskName `
+            -ErrorAction Stop
+        $settings = $registeredTask.Settings
+        $settings.DisallowStartIfOnBatteries = $false
+        $settings.StopIfGoingOnBatteries = $false
+        $settings.WakeToRun = $true
+        $settings.StartWhenAvailable = $true
+        Set-ScheduledTask `
+            -TaskName $TaskName `
+            -Settings $settings `
+            -ErrorAction Stop | Out-Null
+        return
+    }
+
+    # 舊版環境可能沒有 ScheduledTasks 模組；用 Task Scheduler COM
+    # 保留 WakeToRun / StartWhenAvailable，不把任務改回互動式登入。
+    $scheduler = New-Object -ComObject "Schedule.Service"
+    $scheduler.Connect()
+    $rootFolder = $scheduler.GetFolder("\")
+    $registeredTask = $rootFolder.GetTask($TaskName)
+    $definition = $registeredTask.Definition
+    $definition.Settings.DisallowStartIfOnBatteries = $false
+    $definition.Settings.StopIfGoingOnBatteries = $false
+    $definition.Settings.WakeToRun = $true
+    $definition.Settings.StartWhenAvailable = $true
+    $principal = $definition.Principal
+    $taskLogonS4U = 2
+    if ([int]$principal.LogonType -ne $taskLogonS4U) {
+        throw (
+            "拒絕更新排程設定：現有 Principal.LogonType=" +
+            "$($principal.LogonType)，不是 S4U。"
+        )
+    }
+    $taskCreateOrUpdate = 6
+    $rootFolder.RegisterTaskDefinition(
+        $TaskName,
+        $definition,
+        $taskCreateOrUpdate,
+        $principal.UserId,
+        $null,
+        $taskLogonS4U,
+        $null
+    ) | Out-Null
+}
+
+function Get-RegisteredTaskLogonType {
+    $getScheduledTask = Get-Command `
+        "Get-ScheduledTask" `
+        -ErrorAction SilentlyContinue
+    if ($null -ne $getScheduledTask) {
+        $registeredTask = Get-ScheduledTask `
+            -TaskName $TaskName `
+            -ErrorAction Stop
+        return [string]$registeredTask.Principal.LogonType
+    }
+
+    $scheduler = New-Object -ComObject "Schedule.Service"
+    $scheduler.Connect()
+    $rootFolder = $scheduler.GetFolder("\")
+    $registeredTask = $rootFolder.GetTask($TaskName)
+    $logonTypeNumber = [int]$registeredTask.Definition.Principal.LogonType
+    $logonTypeNames = @{
+        0 = "None"
+        1 = "Password"
+        2 = "S4U"
+        3 = "InteractiveToken"
+        4 = "Group"
+        5 = "ServiceAccount"
+        6 = "InteractiveTokenOrPassword"
+    }
+    if ($logonTypeNames.ContainsKey($logonTypeNumber)) {
+        return $logonTypeNames[$logonTypeNumber]
+    }
+    return "Unknown($logonTypeNumber)"
 }
 
 if ($MyInvocation.InvocationName -eq ".") {
@@ -521,29 +594,135 @@ if ($Mode -eq "Execute") {
 }
 
 $escapedScriptPath = $ScriptPath.Replace('"', '""')
-$taskAction = (
-    "powershell.exe -NoProfile -ExecutionPolicy Bypass " +
+$taskPowerShellArguments = (
+    "-NoProfile -ExecutionPolicy Bypass " +
     "-File `"$escapedScriptPath`" -Mode Execute -Port $Port"
+)
+$taskAction = (
+    "powershell.exe $taskPowerShellArguments"
 )
 
 switch ($Mode) {
     "Register" {
-        & schtasks.exe `
-            /Create `
-            /TN $TaskName `
-            /SC WEEKLY `
-            /D MON,TUE,WED,THU,FRI `
-            /ST 08:25 `
-            /TR $taskAction `
-            /RL LIMITED `
-            /F
-        if ($LASTEXITCODE -ne 0) {
-            throw "排程註冊失敗（schtasks exit=$LASTEXITCODE）"
+        $currentUser = (
+            [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+        )
+        if ([string]::IsNullOrWhiteSpace($currentUser)) {
+            throw "無法取得目前 Windows 使用者，拒絕註冊排程。"
         }
+
+        $requiredScheduledTaskCommands = @(
+            "New-ScheduledTaskAction",
+            "New-ScheduledTaskTrigger",
+            "New-ScheduledTaskPrincipal",
+            "New-ScheduledTaskSettingsSet",
+            "Register-ScheduledTask"
+        )
+        $missingScheduledTaskCommands = @(
+            $requiredScheduledTaskCommands |
+                Where-Object {
+                    $null -eq (
+                        Get-Command $_ -ErrorAction SilentlyContinue
+                    )
+                }
+        )
+        $registrationMethod = $null
+        if ($missingScheduledTaskCommands.Count -eq 0) {
+            try {
+                $scheduledAction = New-ScheduledTaskAction `
+                    -Execute "powershell.exe" `
+                    -Argument $taskPowerShellArguments `
+                    -WorkingDirectory $ProjectDir
+                $scheduledTrigger = New-ScheduledTaskTrigger `
+                    -Weekly `
+                    -WeeksInterval 1 `
+                    -DaysOfWeek @(
+                        "Monday",
+                        "Tuesday",
+                        "Wednesday",
+                        "Thursday",
+                        "Friday"
+                    ) `
+                    -At "08:25"
+                $scheduledPrincipal = New-ScheduledTaskPrincipal `
+                    -UserId $currentUser `
+                    -LogonType S4U `
+                    -RunLevel Limited
+                $scheduledSettings = New-ScheduledTaskSettingsSet `
+                    -AllowStartIfOnBatteries `
+                    -DontStopIfGoingOnBatteries `
+                    -WakeToRun `
+                    -StartWhenAvailable
+                Register-ScheduledTask `
+                    -TaskName $TaskName `
+                    -Action $scheduledAction `
+                    -Trigger $scheduledTrigger `
+                    -Principal $scheduledPrincipal `
+                    -Settings $scheduledSettings `
+                    -Force `
+                    -ErrorAction Stop | Out-Null
+                $registrationMethod = "ScheduledTasks/S4U"
+            }
+            catch {
+                Write-Warning (
+                    "ScheduledTasks S4U 註冊不可用，改用 schtasks " +
+                    "/NP 免密碼備援；原因：$($_.Exception.Message)"
+                )
+            }
+        }
+        else {
+            Write-Warning (
+                "缺少 ScheduledTasks 指令（" +
+                "$($missingScheduledTaskCommands -join ', ')），" +
+                "改用 schtasks /NP 免密碼備援。"
+            )
+        }
+
+        if ($null -eq $registrationMethod) {
+            & schtasks.exe `
+                /Create `
+                /TN $TaskName `
+                /SC WEEKLY `
+                /D MON,TUE,WED,THU,FRI `
+                /ST 08:25 `
+                /TR $taskAction `
+                /RU $currentUser `
+                /NP `
+                /RL LIMITED `
+                /F
+            if ($LASTEXITCODE -ne 0) {
+                Write-Warning (
+                    "無法建立免登入排程；未退回互動式任務。"
+                )
+                throw (
+                    "排程免登入註冊失敗" +
+                    "（schtasks /NP exit=$LASTEXITCODE）"
+                )
+            }
+            $registrationMethod = "schtasks/NP"
+        }
+
         Set-ReliableTaskSettings
+        $registeredLogonType = Get-RegisteredTaskLogonType
+        Write-Output (
+            "排程 Principal.LogonType=$registeredLogonType；" +
+            "註冊方式=$registrationMethod"
+        )
+        if ($registeredLogonType -ne "S4U") {
+            Write-Warning (
+                "排程未通過免登入驗證：" +
+                "Principal.LogonType=$registeredLogonType；" +
+                "不會靜默保留為互動式任務。"
+            )
+            throw (
+                "排程 Principal.LogonType 必須為 S4U，" +
+                "實際為 $registeredLogonType。"
+            )
+        }
         Write-Output (
             "已註冊：$TaskName（週一至週五 08:25；" +
-            "service.py live；PORT $Port；可用電池並喚醒執行）"
+            "service.py live；PORT $Port；免登入 S4U；" +
+            "Limited；可用電池；WakeToRun；StartWhenAvailable）"
         )
         if ($RunNow) {
             & schtasks.exe /Run /TN $TaskName

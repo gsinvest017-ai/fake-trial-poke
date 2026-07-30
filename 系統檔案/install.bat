@@ -10,6 +10,7 @@ set "VENV_PYTHON=%VENV_DIR%\Scripts\python.exe"
 set "REQUIREMENTS=%PROJECT_DIR%requirements.txt"
 set "SCHEDULE_SCRIPT=%PROJECT_DIR%schedule_morning.ps1"
 set "ENV_FILE=%PROJECT_DIR%.env"
+set "LOGIN_SMOKE=%PROJECT_DIR%scripts\verify_login.py"
 
 echo.
 echo ========================================
@@ -30,20 +31,24 @@ if not exist "%ENV_FILE%" (
     echo Obtain the complete folder from the system provider. Never share .env.
     goto :failed
 )
+if not exist "%LOGIN_SMOKE%" (
+    echo [FAILED] scripts\verify_login.py was not found.
+    goto :failed
+)
 
 if exist "%VENV_PYTHON%" (
     "%VENV_PYTHON%" -c "import sys" >nul 2>nul && (
-        echo [1/4] Existing .venv found. Reusing it.
+        echo [1/5] Existing .venv found. Reusing it.
         goto :venv_ready
     )
-    echo [1/4] Existing .venv is unusable. Rebuilding it ...
+    echo [1/5] Existing .venv is unusable. Rebuilding it ...
     call :remove_venv
     if errorlevel 1 (
         echo [FAILED] Unable to remove the unusable .venv.
         goto :failed
     )
 ) else if exist "%VENV_DIR%\" (
-    echo [1/4] Existing .venv is incomplete. Rebuilding it ...
+    echo [1/5] Existing .venv is incomplete. Rebuilding it ...
     call :remove_venv
     if errorlevel 1 (
         echo [FAILED] Unable to remove the incomplete .venv.
@@ -51,7 +56,7 @@ if exist "%VENV_PYTHON%" (
     )
 )
 
-echo [1/4] Creating the folder-local .venv ...
+echo [1/5] Creating the folder-local .venv ...
 call :create_venv
 if errorlevel 1 (
     echo [FAILED] Unable to create .venv.
@@ -60,21 +65,28 @@ if errorlevel 1 (
 )
 
 :venv_ready
-echo [2/4] Upgrading pip ...
+echo [2/5] Upgrading pip ...
 "%VENV_PYTHON%" -m pip install --upgrade pip
 if errorlevel 1 (
     echo [FAILED] pip upgrade failed. Check the network and Python installation.
     goto :failed
 )
 
-echo [3/4] Installing requirements.txt ...
+echo [3/5] Installing requirements.txt ...
 "%VENV_PYTHON%" -m pip install -r "%REQUIREMENTS%"
 if errorlevel 1 (
     echo [FAILED] Dependency installation failed. Review the messages above.
     goto :failed
 )
 
-echo [4/4] Registering the 08:25 scheduled recording task ...
+echo [4/5] Verifying Shioaji credentials ...
+"%VENV_PYTHON%" "%LOGIN_SMOKE%"
+if errorlevel 1 (
+    echo [FAILED] 金鑰無法登入永豐，請檢查 .env。
+    goto :failed
+)
+
+echo [5/5] Registering the 08:25 scheduled recording task ...
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%SCHEDULE_SCRIPT%" -Mode Register -Port 8900
 if errorlevel 1 (
     echo [FAILED] Python is ready, but scheduled-task registration failed.

@@ -22,6 +22,7 @@ StateProvider = Callable[[], Mapping[str, Any]] | Any
 ControlHandler = Callable[[str, bool | None], Mapping[str, Any]]
 
 _LOGGER = logging.getLogger(__name__)
+_ALLOWED_CONTROL_HOSTS = frozenset({"127.0.0.1", "localhost"})
 _CONTENT_SECURITY_POLICY = (
     "default-src 'self'; "
     "style-src 'self' 'unsafe-inline'; "
@@ -67,6 +68,24 @@ def _is_within_ui(path: Path) -> bool:
     except ValueError:
         return False
     return True
+
+
+def _is_allowed_control_source(value: str, server_port: int) -> bool:
+    """Return whether an Origin/Referer value names this local HTTP service."""
+    try:
+        source = urlsplit(value)
+        source_port = source.port
+    except (TypeError, ValueError):
+        return False
+
+    if (
+        source.scheme.lower() != "http"
+        or source.hostname not in _ALLOWED_CONTROL_HOSTS
+    ):
+        return False
+    if source_port is None:
+        source_port = 80
+    return source_port == server_port
 
 
 class LocalHTTPServer(ThreadingHTTPServer):
@@ -124,7 +143,32 @@ class DetectorRequestHandler(BaseHTTPRequestHandler):
                 {"error": "not_found", "message": "找不到指定的本機資源"},
             )
             return
+        if not self._is_control_request_allowed():
+            self._send_json(
+                403,
+                {
+                    "error": "forbidden",
+                    "message": "控制請求未通過本機安全驗證",
+                },
+            )
+            return
         self._serve_control()
+
+    def _is_control_request_allowed(self) -> bool:
+        server_port = int(self.server.server_address[1])
+        for header_name in ("Origin", "Referer"):
+            source = self.headers.get(header_name)
+            if source is not None and not _is_allowed_control_source(
+                source,
+                server_port,
+            ):
+                return False
+
+        content_type = self.headers.get("Content-Type", "")
+        media_type = content_type.partition(";")[0].strip().lower()
+        if media_type != "application/json":
+            return False
+        return self.headers.get("X-Auction-Control") == "1"
 
     def _serve_control(self) -> None:
         handler = self.server.control_handler

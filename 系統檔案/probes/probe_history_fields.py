@@ -193,4 +193,11 @@ def main() -> int:
 if __name__ == "__main__":
     if callable(getattr(sys.stdout, "reconfigure", None)):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    if __package__:
+        from ._execution_guard import require_explicit_broker_login_confirmation
+    else:
+        from _execution_guard import require_explicit_broker_login_confirmation
+
+    if not require_explicit_broker_login_confirmation():
+        raise SystemExit(2)
     raise SystemExit(main())
