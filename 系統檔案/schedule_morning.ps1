@@ -13,6 +13,8 @@ $ScriptPath = $MyInvocation.MyCommand.Path
 $ServicePath = Join-Path -Path $ProjectDir -ChildPath "service.py"
 $LogDir = Join-Path -Path $ProjectDir -ChildPath "log"
 $LaunchTimeoutSeconds = 20
+$RepetitionIntervalMinutes = 2
+$RepetitionDurationMinutes = 45
 $InteractiveTaskWarning = (
     "目前為互動式排程：電腦需保持登入才會於 08:25 錄製；" +
     "若要開機未登入也自動錄製，請以系統管理員身分重新執行安裝" +
@@ -56,9 +58,27 @@ function Get-ServiceStateClassification {
         -and $recordingProperty.Value -is [bool] `
         -and $recordingProperty.Value
     )
+    $sourceAliveProperty = $State.PSObject.Properties["source_alive"]
+    $sourceAlive = (
+        $null -ne $sourceAliveProperty `
+        -and $sourceAliveProperty.Value -is [bool] `
+        -and $sourceAliveProperty.Value
+    )
+    $circuitProperty = $State.PSObject.Properties["login_circuit_open"]
+    $loginCircuitOpen = (
+        $null -ne $circuitProperty `
+        -and $circuitProperty.Value -is [bool] `
+        -and $circuitProperty.Value
+    )
+    if ($loginCircuitOpen -and $sourceAlive) {
+        return "retry-suppressed"
+    }
     if (
-        $serviceStatus -in @("live", "armed") `
-        -or $isRecording
+        $sourceAlive `
+        -and (
+            $serviceStatus -in @("idle", "armed", "closed") `
+            -or ($serviceStatus -eq "live" -and $isRecording)
+        )
     ) {
         return "live-recorder"
     }
@@ -88,6 +108,18 @@ function Test-ServiceHealth {
         else {
             $null
         }
+        $sourceAliveProperty = if ($null -ne $state) {
+            $state.PSObject.Properties["source_alive"]
+        }
+        else {
+            $null
+        }
+        $circuitProperty = if ($null -ne $state) {
+            $state.PSObject.Properties["login_circuit_open"]
+        }
+        else {
+            $null
+        }
         return [pscustomobject]@{
             Classification = $classification
             ServiceStatus = if ($null -ne $statusProperty) {
@@ -101,6 +133,16 @@ function Test-ServiceHealth {
                 -and $recordingProperty.Value -is [bool] `
                 -and $recordingProperty.Value
             )
+            SourceAlive = (
+                $null -ne $sourceAliveProperty `
+                -and $sourceAliveProperty.Value -is [bool] `
+                -and $sourceAliveProperty.Value
+            )
+            LoginCircuitOpen = (
+                $null -ne $circuitProperty `
+                -and $circuitProperty.Value -is [bool] `
+                -and $circuitProperty.Value
+            )
             Detail = $null
         }
     }
@@ -112,6 +154,8 @@ function Test-ServiceHealth {
                 -ResponseReceived $responseReceived
             ServiceStatus = $null
             Recording = $false
+            SourceAlive = $false
+            LoginCircuitOpen = $false
             Detail = $_.Exception.Message
         }
     }
@@ -230,6 +274,13 @@ function Stop-OursNotLiveListener {
             ServiceStatus = $confirmedHealth.ServiceStatus
         }
     }
+    if ($confirmedHealth.Classification -eq "retry-suppressed") {
+        return [pscustomobject]@{
+            Action = "retry-suppressed"
+            ProcessId = $expectedPid
+            ServiceStatus = $confirmedHealth.ServiceStatus
+        }
+    }
     if (
         $confirmedHealth.Classification -eq "none" `
         -and $confirmedPids.Count -eq 0
@@ -309,7 +360,17 @@ function Start-CoordinatedService {
             Write-Output (
                 "service.py 已在 127.0.0.1:$Port live 錄製" +
                 "（status=$($initialHealth.ServiceStatus)，" +
+                "source_alive=$($initialHealth.SourceAlive)，" +
                 "recording=$($initialHealth.Recording)）；不重複啟動。"
+            )
+            return
+        }
+        "retry-suppressed" {
+            Write-Warning (
+                "service.py 的本日登入斷路器已開啟" +
+                "（status=$($initialHealth.ServiceStatus)，" +
+                "source_alive=$($initialHealth.SourceAlive)）；" +
+                "保留錯誤狀態供面板查看，且不重啟／不再登入券商。"
             )
             return
         }
@@ -324,6 +385,14 @@ function Start-CoordinatedService {
                         "（PID=$($reclaimResult.ProcessId)，" +
                         "status=$($reclaimResult.ServiceStatus)）；" +
                         "不重複啟動。"
+                    )
+                    return
+                }
+                "retry-suppressed" {
+                    Write-Warning (
+                        "service.py 在收回前已開啟本日登入斷路器" +
+                        "（PID=$($reclaimResult.ProcessId)）；" +
+                        "不終止、不重啟，也不再登入券商。"
                     )
                     return
                 }
@@ -404,7 +473,7 @@ function Start-CoordinatedService {
         if (
             $launchHealth.Classification -in @(
                 "live-recorder",
-                "ours-not-live"
+                "retry-suppressed"
             )
         ) {
             $launchListenerPids = @(
@@ -451,6 +520,7 @@ function Start-CoordinatedService {
                 "UI=http://127.0.0.1:$Port/；" +
                 "分類=$($launchHealth.Classification)；" +
                 "status=$($launchHealth.ServiceStatus)；" +
+                "source_alive=$($launchHealth.SourceAlive)；" +
                 "recording=$($launchHealth.Recording)；" +
                 "監聽 PID=$launchListenerPid；" +
                 "錄製路徑=data\history\YYYYMMDD\"
@@ -487,6 +557,7 @@ function Start-CoordinatedService {
         "service.py 已啟動但 $LaunchTimeoutSeconds 秒內未通過 " +
         "live 錄製健康檢查；最後分類=$($launchHealth.Classification)，" +
         "status=$($launchHealth.ServiceStatus)，" +
+        "source_alive=$($launchHealth.SourceAlive)，" +
         "recording=$($launchHealth.Recording)"
     )
 }
@@ -573,6 +644,32 @@ function Get-RegisteredTaskLogonType {
     return "Unknown($logonTypeNumber)"
 }
 
+function Get-RegisteredTaskRepetition {
+    $getScheduledTask = Get-Command `
+        "Get-ScheduledTask" `
+        -ErrorAction SilentlyContinue
+    if ($null -ne $getScheduledTask) {
+        $registeredTask = Get-ScheduledTask `
+            -TaskName $TaskName `
+            -ErrorAction Stop
+        $trigger = @($registeredTask.Triggers)[0]
+        return [pscustomobject]@{
+            Interval = [string]$trigger.Repetition.Interval
+            Duration = [string]$trigger.Repetition.Duration
+        }
+    }
+
+    $scheduler = New-Object -ComObject "Schedule.Service"
+    $scheduler.Connect()
+    $rootFolder = $scheduler.GetFolder("\")
+    $registeredTask = $rootFolder.GetTask($TaskName)
+    $trigger = $registeredTask.Definition.Triggers.Item(1)
+    return [pscustomobject]@{
+        Interval = [string]$trigger.Repetition.Interval
+        Duration = [string]$trigger.Repetition.Duration
+    }
+}
+
 if ($MyInvocation.InvocationName -eq ".") {
     return
 }
@@ -655,6 +752,18 @@ switch ($Mode) {
                         "Friday"
                     ) `
                     -At "08:25"
+                $repetitionPrototype = New-ScheduledTaskTrigger `
+                    -Once `
+                    -At "08:25" `
+                    -RepetitionInterval (
+                        New-TimeSpan -Minutes $RepetitionIntervalMinutes
+                    ) `
+                    -RepetitionDuration (
+                        New-TimeSpan -Minutes $RepetitionDurationMinutes
+                    )
+                $scheduledTrigger.Repetition = (
+                    $repetitionPrototype.Repetition
+                )
                 $scheduledSettings = New-ScheduledTaskSettingsSet `
                     -AllowStartIfOnBatteries `
                     -DontStopIfGoingOnBatteries `
@@ -742,6 +851,8 @@ switch ($Mode) {
                 /SC WEEKLY `
                 /D MON,TUE,WED,THU,FRI `
                 /ST 08:25 `
+                /RI $RepetitionIntervalMinutes `
+                /DU 00:45 `
                 /TR $taskAction `
                 /RL LIMITED `
                 /F
@@ -759,9 +870,22 @@ switch ($Mode) {
 
         Set-ReliableTaskSettings
         $registeredLogonType = Get-RegisteredTaskLogonType
+        $registeredRepetition = Get-RegisteredTaskRepetition
+        if (
+            $registeredRepetition.Interval -ne "PT2M" `
+            -or $registeredRepetition.Duration -ne "PT45M"
+        ) {
+            throw (
+                "排程 Repetition 驗證失敗；預期 PT2M/PT45M，實際為 " +
+                "$($registeredRepetition.Interval)/" +
+                "$($registeredRepetition.Duration)"
+            )
+        }
         Write-Output (
             "排程 Principal.LogonType=$registeredLogonType；" +
-            "註冊方式=$registrationMethod"
+            "註冊方式=$registrationMethod；" +
+            "Repetition=$($registeredRepetition.Interval)/" +
+            "$($registeredRepetition.Duration)"
         )
         $isS4UTask = $registeredLogonType -eq "S4U"
         $isInteractiveTask = $registeredLogonType -in @(
@@ -777,6 +901,7 @@ switch ($Mode) {
         if ($isS4UTask) {
             Write-Output (
                 "已註冊：$TaskName（週一至週五 08:25；" +
+                "每 2 分鐘重複、持續 45 分鐘；" +
                 "service.py live；PORT $Port；免登入 S4U；" +
                 "Limited；可用電池；WakeToRun；StartWhenAvailable）"
             )
@@ -785,6 +910,7 @@ switch ($Mode) {
             Write-Warning $InteractiveTaskWarning
             Write-Output (
                 "已註冊：$TaskName（週一至週五 08:25；" +
+                "每 2 分鐘重複、持續 45 分鐘；" +
                 "service.py live；PORT $Port；互動式；需保持登入；" +
                 "Limited；可用電池；WakeToRun；StartWhenAvailable）"
             )
@@ -822,7 +948,10 @@ switch ($Mode) {
         }
         Write-Output (
             "服務健康分類=$($health.Classification)；" +
-            "service_status=$statusText；recording=$($health.Recording)"
+            "service_status=$statusText；" +
+            "source_alive=$($health.SourceAlive)；" +
+            "recording=$($health.Recording)；" +
+            "login_circuit_open=$($health.LoginCircuitOpen)"
         )
     }
     "Unregister" {

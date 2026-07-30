@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import errno
 import json
 import os
 import queue
@@ -27,10 +28,20 @@ import time
 from datetime import date, datetime, time as datetime_time, timedelta
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 from zoneinfo import ZoneInfo
 
 import control_state
+
+try:
+    import msvcrt
+except ImportError:  # pragma: no cover - 正式環境為 Windows
+    msvcrt = None  # type: ignore[assignment]
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Windows 沒有 fcntl
+    fcntl = None  # type: ignore[assignment]
 
 
 # 必須在匯入 Shioaji 前降低第三方套件輸出敏感連線資訊的風險。
@@ -49,6 +60,14 @@ POSTOPEN_MINUTES = 5
 PUBLISH_INTERVAL_SECONDS = 0.2
 SUBSCRIBE_EVENT_GRACE_SECONDS = 0.01
 LOGIN_RETRY_SECONDS = 30.0
+LOGIN_RETRY_MAX_SECONDS = 300.0
+LOGIN_MAX_CONSECUTIVE_FAILURES = 5
+SOURCE_MAX_CONSECUTIVE_FAILURES = 5
+SOURCE_RETRY_BASE_SECONDS = 1.0
+SOURCE_RETRY_MAX_SECONDS = 30.0
+SOURCE_STABLE_RESET_SECONDS = 60.0
+SOURCE_HEARTBEAT_INTERVAL_SECONDS = 1.0
+SOURCE_HEARTBEAT_STALE_SECONDS = 5.0
 DEFAULT_STALE_AFTER_SECONDS = 10.0
 TELEGRAM_NOTIFY_DEADLINE_SECONDS = 60.0
 TODAY_RECORDING_SUCCESS_THRESHOLD = 100
@@ -201,6 +220,157 @@ def paired_postopen_path(record_path: Path) -> Path:
     return record_path.with_name(
         f"{record_path.stem}_postopen{record_path.suffix}"
     )
+
+
+class LiveRecordingAlreadyActive(RuntimeError):
+    """同一錄製目標已有另一個程序持有 OS 級鎖。"""
+
+
+class LiveRecordingLock:
+    """以每日輸出目錄內的一個位元組檔案鎖保護 live 錄製。"""
+
+    def __init__(self, record_target: Path) -> None:
+        self.record_target = relative_path(record_target)
+        self.path = self.record_target.parent / ".record.lock"
+        self._handle: Any | None = None
+
+    @property
+    def held(self) -> bool:
+        return self._handle is not None
+
+    def acquire(self) -> None:
+        if self.held:
+            return
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        handle = self.path.open("a+b")
+        try:
+            handle.seek(0, os.SEEK_END)
+            if handle.tell() == 0:
+                handle.write(b"\0")
+                handle.flush()
+            handle.seek(0)
+            if msvcrt is not None:
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            elif fcntl is not None:  # pragma: no cover - 非 Windows 備援
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            else:  # pragma: no cover - 無可用 OS lock 的極端環境
+                raise OSError("platform file locking is unavailable")
+        except OSError as exc:
+            handle.close()
+            if exc.errno in {errno.EACCES, errno.EAGAIN, errno.EDEADLK}:
+                raise LiveRecordingAlreadyActive(
+                    f"live 錄製鎖已被持有：{self.path}"
+                ) from exc
+            raise
+        self._handle = handle
+
+    def release(self) -> None:
+        handle = self._handle
+        if handle is None:
+            return
+        self._handle = None
+        try:
+            handle.seek(0)
+            if msvcrt is not None:
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            elif fcntl is not None:  # pragma: no cover - 非 Windows 備援
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            handle.close()
+
+
+class LiveRecordingLockManager:
+    """讓 supervisor 重啟 worker 時仍由同一程序持續持有 live 鎖。"""
+
+    def __init__(self, initial_lock: LiveRecordingLock) -> None:
+        if not initial_lock.held:
+            raise ValueError("initial live recording lock must be held")
+        self._lock = threading.Lock()
+        self._current = initial_lock
+
+    @classmethod
+    def acquire_for(cls, record_target: Path) -> "LiveRecordingLockManager":
+        live_lock = LiveRecordingLock(record_target)
+        live_lock.acquire()
+        return cls(live_lock)
+
+    def ensure_for(self, record_target: Path) -> None:
+        desired = LiveRecordingLock(record_target)
+        with self._lock:
+            if (
+                self._current.held
+                and self._current.path.resolve() == desired.path.resolve()
+            ):
+                return
+            desired.acquire()
+            previous = self._current
+            self._current = desired
+            previous.release()
+
+    def owns(self, record_target: Path) -> bool:
+        desired = LiveRecordingLock(record_target)
+        with self._lock:
+            return (
+                self._current.held
+                and self._current.path.resolve() == desired.path.resolve()
+            )
+
+    def release(self) -> None:
+        with self._lock:
+            self._current.release()
+
+
+def live_record_target(start_at: datetime, record_out: Path | None) -> Path:
+    return (
+        relative_path(record_out)
+        if record_out is not None
+        else default_live_record_path(start_at)
+    )
+
+
+def login_circuit_path(record_target: Path) -> Path:
+    return relative_path(record_target).parent / ".login-circuit.json"
+
+
+def read_login_circuit(
+    record_target: Path,
+    target_day: date,
+) -> dict[str, Any] | None:
+    marker_path = login_circuit_path(record_target)
+    try:
+        payload = json.loads(marker_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return None
+    if (
+        not isinstance(payload, dict)
+        or payload.get("date") != target_day.isoformat()
+        or payload.get("status") != "open"
+    ):
+        return None
+    return payload
+
+
+def write_login_circuit(
+    record_target: Path,
+    target_day: date,
+    failure_count: int,
+) -> Path:
+    marker_path = login_circuit_path(record_target)
+    marker_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path = marker_path.with_suffix(marker_path.suffix + ".tmp")
+    payload = {
+        "date": target_day.isoformat(),
+        "status": "open",
+        "failure_count": int(failure_count),
+        "opened_at": iso_taipei(),
+    }
+    with temporary_path.open("w", encoding="utf-8", newline="\n") as handle:
+        json.dump(payload, handle, ensure_ascii=False, indent=2)
+        handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    temporary_path.replace(marker_path)
+    return marker_path
 
 
 @lru_cache(maxsize=64)
@@ -450,6 +620,14 @@ def empty_state(
         "last_event_age_sec": None,
         "login_ok": False,
         "subscribe_ok": False,
+        "source_alive": None,
+        "source_thread_alive": None,
+        "source_heartbeat_at": None,
+        "source_heartbeat_age_sec": None,
+        "source_restart_count": 0,
+        "source_error": None,
+        "login_circuit_open": False,
+        "login_failure_count": 0,
         "counts": {
             "suspected_fake": 0,
             "locked_held": 0,
@@ -758,6 +936,15 @@ class ServiceRuntime:
         self._auto_record_enabled = bool(auto_record_enabled)
         self._last_event_ts: datetime | None = None
         self._stale_after_seconds = stale_after_seconds
+        self._source_thread: threading.Thread | None = None
+        self._source_thread_started = False
+        self._source_required = False
+        self._source_worker_alive = False
+        self._source_heartbeat_at: datetime | None = None
+        self._source_restart_count = 0
+        self._source_error: str | None = None
+        self._login_circuit_open = False
+        self._login_failure_count = 0
         self._record_writer: ServiceJsonlWriter | None = None
         self._record_path: Path | None = None
         self._record_count = 0
@@ -810,6 +997,8 @@ class ServiceRuntime:
         subscribed: int | None = None,
         login_ok: bool | None = None,
         subscribe_ok: bool | None = None,
+        login_circuit_open: bool | None = None,
+        login_failure_count: int | None = None,
         last_event_ts: datetime | str | None | object = ...,
     ) -> None:
         with self._lock:
@@ -827,6 +1016,13 @@ class ServiceRuntime:
                 self._login_ok = bool(login_ok)
             if subscribe_ok is not None:
                 self._subscribe_ok = bool(subscribe_ok)
+            if login_circuit_open is not None:
+                self._login_circuit_open = bool(login_circuit_open)
+            if login_failure_count is not None:
+                self._login_failure_count = max(
+                    0,
+                    int(login_failure_count),
+                )
             if last_event_ts is not ...:
                 if isinstance(last_event_ts, datetime):
                     parsed_last_event = last_event_ts
@@ -841,6 +1037,48 @@ class ServiceRuntime:
                     self._last_event_ts = parsed_last_event
                 else:
                     self._last_event_ts = parse_iso(last_event_ts)
+
+    def bind_source_thread(
+        self,
+        source_thread: threading.Thread,
+        *,
+        required: bool,
+    ) -> None:
+        with self._lock:
+            self._source_thread = source_thread
+            self._source_required = bool(required)
+            self._source_thread_started = False
+            self._source_worker_alive = False
+            self._source_heartbeat_at = None
+            self._source_restart_count = 0
+            self._source_error = None
+
+    def mark_source_thread_started(self) -> None:
+        with self._lock:
+            self._source_thread_started = True
+            if not self._source_required:
+                self._source_worker_alive = True
+            self._source_heartbeat_at = taipei_now()
+
+    def update_source_health(
+        self,
+        *,
+        worker_alive: bool | None = None,
+        restart_count: int | None = None,
+        error_type: str | None | object = ...,
+        heartbeat: bool = True,
+    ) -> None:
+        with self._lock:
+            if worker_alive is not None:
+                self._source_worker_alive = bool(worker_alive)
+            if restart_count is not None:
+                self._source_restart_count = max(0, int(restart_count))
+            if error_type is not ...:
+                self._source_error = (
+                    str(error_type) if error_type is not None else None
+                )
+            if heartbeat:
+                self._source_heartbeat_at = taipei_now()
 
     def set_auto_record_enabled(self, enabled: bool) -> None:
         with self._lock:
@@ -943,6 +1181,47 @@ class ServiceRuntime:
         with self._lock:
             now_value = self._now_override or iso_taipei()
             wall_now = taipei_now()
+            source_thread_alive = (
+                bool(self._source_thread.is_alive())
+                if self._source_thread_started
+                and self._source_thread is not None
+                else None
+            )
+            source_heartbeat_age_sec = (
+                round(
+                    max(
+                        0.0,
+                        (
+                            wall_now - self._source_heartbeat_at
+                        ).total_seconds(),
+                    ),
+                    1,
+                )
+                if self._source_heartbeat_at is not None
+                else None
+            )
+            source_heartbeat_fresh = (
+                source_heartbeat_age_sec is None
+                or source_heartbeat_age_sec
+                <= SOURCE_HEARTBEAT_STALE_SECONDS
+            )
+            source_alive = (
+                bool(
+                    source_thread_alive
+                    and (
+                        self._source_worker_alive
+                        if self._source_required
+                        else True
+                    )
+                    and (
+                        source_heartbeat_fresh
+                        if self._source_required
+                        else True
+                    )
+                )
+                if source_thread_alive is not None
+                else None
+            )
             active_writer = self._record_writer or self._aux_record_writer
             if active_writer is not None and active_writer.error is not None:
                 self._record_error = active_writer.error
@@ -969,6 +1248,12 @@ class ServiceRuntime:
             if (
                 service_status != "replay"
                 and self._record_error is not None
+            ):
+                service_status = "error"
+            if (
+                self._source_required
+                and self._source_thread_started
+                and source_alive is not True
             ):
                 service_status = "error"
             detector_status = (
@@ -1010,6 +1295,18 @@ class ServiceRuntime:
                     "last_event_age_sec": last_event_age_sec,
                     "login_ok": self._login_ok,
                     "subscribe_ok": self._subscribe_ok,
+                    "source_alive": source_alive,
+                    "source_thread_alive": source_thread_alive,
+                    "source_heartbeat_at": (
+                        iso_taipei(self._source_heartbeat_at)
+                        if self._source_heartbeat_at is not None
+                        else None
+                    ),
+                    "source_heartbeat_age_sec": source_heartbeat_age_sec,
+                    "source_restart_count": self._source_restart_count,
+                    "source_error": self._source_error,
+                    "login_circuit_open": self._login_circuit_open,
+                    "login_failure_count": self._login_failure_count,
                 }
             )
             active_record_count = (
@@ -1046,6 +1343,123 @@ def publish_loop(runtime: ServiceRuntime, stop_event: threading.Event) -> None:
                 )
                 last_error_at = current
         stop_event.wait(PUBLISH_INTERVAL_SECONDS)
+
+
+def supervise_source_worker(
+    runtime: ServiceRuntime,
+    worker: Callable[[], None],
+    stop_event: threading.Event,
+    *,
+    max_consecutive_failures: int = SOURCE_MAX_CONSECUTIVE_FAILURES,
+    retry_base_seconds: float = SOURCE_RETRY_BASE_SECONDS,
+    retry_max_seconds: float = SOURCE_RETRY_MAX_SECONDS,
+    stable_reset_seconds: float = SOURCE_STABLE_RESET_SECONDS,
+    heartbeat_interval_seconds: float = SOURCE_HEARTBEAT_INTERVAL_SECONDS,
+) -> None:
+    """監督 live worker；非停止例外會有界重啟而非靜默死透。"""
+    consecutive_failures = 0
+    restart_count = 0
+    max_failures = max(1, int(max_consecutive_failures))
+
+    while not stop_event.is_set():
+        outcome: dict[str, str] = {}
+
+        def run_attempt() -> None:
+            try:
+                worker()
+            except BaseException as exc:
+                # 不輸出例外文字，避免第三方函式把憑證帶進訊息。
+                outcome["error_type"] = type(exc).__name__
+
+        attempt_started_at = time.monotonic()
+        attempt = threading.Thread(
+            target=run_attempt,
+            name="auction-live-worker",
+            daemon=True,
+        )
+        try:
+            attempt.start()
+        except BaseException as exc:
+            outcome["error_type"] = type(exc).__name__
+        else:
+            runtime.update_source_health(
+                worker_alive=True,
+                restart_count=restart_count,
+                error_type=None,
+            )
+            while attempt.is_alive():
+                attempt.join(timeout=max(0.05, heartbeat_interval_seconds))
+                runtime.update_source_health(
+                    worker_alive=attempt.is_alive(),
+                    restart_count=restart_count,
+                )
+
+        runtime.update_source_health(
+            worker_alive=False,
+            restart_count=restart_count,
+        )
+        if stop_event.is_set():
+            return
+
+        elapsed = time.monotonic() - attempt_started_at
+        if elapsed >= max(0.0, stable_reset_seconds):
+            consecutive_failures = 0
+        consecutive_failures += 1
+        error_type = outcome.get(
+            "error_type",
+            "UnexpectedWorkerExit",
+        )
+        runtime.set_context(service_status="error")
+        runtime.update_source_health(
+            worker_alive=False,
+            restart_count=restart_count,
+            error_type=error_type,
+        )
+        runtime.publish()
+        print(
+            "live source worker FAILED"
+            f"（{error_type}；連續 {consecutive_failures}/"
+            f"{max_failures}）",
+            flush=True,
+        )
+        if consecutive_failures >= max_failures:
+            print(
+                "live source supervisor 已達連續失敗上限；"
+                "停止自動重啟並保持 service_status=error",
+                flush=True,
+            )
+            return
+
+        retry_seconds = min(
+            max(0.0, retry_max_seconds),
+            max(0.0, retry_base_seconds)
+            * (2 ** (consecutive_failures - 1)),
+        )
+        restart_count += 1
+        runtime.update_source_health(
+            worker_alive=False,
+            restart_count=restart_count,
+            error_type=error_type,
+        )
+        print(
+            f"live source supervisor 將於 {retry_seconds:g} 秒後重啟 worker",
+            flush=True,
+        )
+        retry_deadline = time.monotonic() + retry_seconds
+        while not stop_event.is_set():
+            remaining = retry_deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            runtime.update_source_health(
+                worker_alive=False,
+                restart_count=restart_count,
+            )
+            stop_event.wait(
+                min(
+                    max(0.05, heartbeat_interval_seconds),
+                    remaining,
+                )
+            )
 
 
 class ControlActionError(RuntimeError):
@@ -1567,6 +1981,10 @@ class LiveSourceError(RuntimeError):
     pass
 
 
+class LiveLoginError(LiveSourceError):
+    """憑證載入或券商登入失敗；受每日斷路器保護。"""
+
+
 def _configure_quiet_solace() -> None:
     import pysolace
 
@@ -1596,11 +2014,11 @@ def load_live_credentials() -> tuple[str, str]:
     try:
         env = recorder.load_dotenv_manually(BASE_DIR / ".env")
     except Exception as exc:
-        raise LiveSourceError("missing credentials") from exc
+        raise LiveLoginError("missing credentials") from exc
     api_key = env.get("SHIOAJI_API_KEY", "").strip()
     secret_key = env.get("SHIOAJI_SECRET_KEY", "").strip()
     if not api_key or not secret_key:
-        raise LiveSourceError("missing credentials")
+        raise LiveLoginError("missing credentials")
     for secret in (api_key, secret_key):
         if secret not in recorder.REDACTIONS:
             recorder.REDACTIONS.append(secret)
@@ -1652,6 +2070,7 @@ def run_one_live_window(
     record_enabled: bool,
     record_out: Path | None,
     result_out: Path | None = None,
+    notification_owner: bool = False,
 ) -> bool:
     """連線並處理盤前、開盤 snapshot 與五分鐘開盤後續錄。"""
     import recorder
@@ -1740,7 +2159,7 @@ def run_one_live_window(
             )
             runtime.set_context(login_ok=True, subscribe_ok=False)
         except Exception as exc:
-            raise LiveSourceError(
+            raise LiveLoginError(
                 f"login FAILED（{recorder.safe_error(exc)}）"
             ) from exc
 
@@ -1999,7 +2418,7 @@ def run_one_live_window(
                     "盤前 meta/result 落地 FAILED"
                 ) from exc
             print(f"detector result={written_result}", flush=True)
-            if session == "preopen":
+            if session == "preopen" and notification_owner:
                 start_telegram_result_notification(written_result)
         print(
             f"窗口收口：snapshot={snapshot_count}/{len(universe)}；"
@@ -2172,8 +2591,11 @@ def live_worker(
     record_out: Path | None,
     result_out: Path | None = None,
     control: RecordingControl | None = None,
+    lock_manager: LiveRecordingLockManager | None = None,
 ) -> None:
     completed_a_window = False
+    consecutive_login_failures = 0
+    announced_circuit_day: date | None = None
     while not stop_event.is_set():
         now = taipei_now()
         start_at, end_at = upcoming_window(
@@ -2199,6 +2621,78 @@ def live_worker(
             runtime.publish()
             control.wait_for_change(stop_event, 30.0)
             continue
+
+        record_target = (
+            live_record_target(start_at, record_out)
+            if record_enabled
+            else None
+        )
+        if record_target is not None:
+            if lock_manager is None:
+                raise RuntimeError(
+                    "live 錄製缺少程序級單例鎖管理器"
+                )
+            try:
+                lock_manager.ensure_for(record_target)
+            except LiveRecordingAlreadyActive:
+                runtime.set_context(
+                    service_status="error",
+                    next_window_at=iso_taipei(start_at),
+                )
+                runtime.publish()
+                print(
+                    "同一日 live 錄製已有其他程序持鎖；"
+                    "本程序讓位並停止",
+                    flush=True,
+                )
+                stop_event.set()
+                return
+
+            persisted_circuit = read_login_circuit(
+                record_target,
+                start_at.date(),
+            )
+            if persisted_circuit is not None:
+                failure_count = max(
+                    LOGIN_MAX_CONSECUTIVE_FAILURES,
+                    safe_int(persisted_circuit.get("failure_count")),
+                )
+                runtime.set_context(
+                    service_status="error",
+                    next_window_at=iso_taipei(start_at),
+                    login_ok=False,
+                    subscribe_ok=False,
+                    login_circuit_open=True,
+                    login_failure_count=failure_count,
+                )
+                runtime.publish()
+                if announced_circuit_day != start_at.date():
+                    print(
+                        "登入斷路器本日已開啟；"
+                        "略過券商登入並等待下一個交易日",
+                        flush=True,
+                    )
+                    announced_circuit_day = start_at.date()
+                next_start, _next_end = next_window_after(
+                    end_at,
+                    start_clock,
+                    end_clock,
+                )
+                runtime.set_context(next_window_at=iso_taipei(next_start))
+                wait_until = next_start - timedelta(
+                    minutes=PREARM_MINUTES
+                )
+                if stop_wait(
+                    stop_event,
+                    max(1.0, (wait_until - taipei_now()).total_seconds()),
+                ):
+                    return
+                continue
+
+        runtime.set_context(
+            login_circuit_open=False,
+            login_failure_count=consecutive_login_failures,
+        )
         prearm_at = start_at - timedelta(minutes=PREARM_MINUTES)
         if now < prearm_at:
             runtime.set_context(
@@ -2239,6 +2733,16 @@ def live_worker(
                     record_enabled=record_enabled,
                     record_out=record_out,
                     result_out=result_out,
+                    notification_owner=bool(
+                        record_target is not None
+                        and lock_manager is not None
+                        and lock_manager.owns(record_target)
+                    ),
+                )
+                consecutive_login_failures = 0
+                runtime.set_context(
+                    login_circuit_open=False,
+                    login_failure_count=0,
                 )
                 if completed_a_window:
                     prune_history()
@@ -2249,23 +2753,70 @@ def live_worker(
                 if control is not None:
                     control.end_session(session_stop)
                 print(str(exc), flush=True)
+                is_login_failure = isinstance(exc, LiveLoginError)
+                if is_login_failure:
+                    consecutive_login_failures += 1
+                else:
+                    consecutive_login_failures = 0
                 runtime.set_context(
                     service_status="error",
                     next_window_at=iso_taipei(start_at),
                     now_override=None,
+                    login_circuit_open=False,
+                    login_failure_count=consecutive_login_failures,
                 )
+                runtime.publish()
+                if (
+                    is_login_failure
+                    and consecutive_login_failures
+                    >= LOGIN_MAX_CONSECUTIVE_FAILURES
+                ):
+                    if record_target is not None:
+                        try:
+                            write_login_circuit(
+                                record_target,
+                                start_at.date(),
+                                consecutive_login_failures,
+                            )
+                        except Exception as marker_exc:
+                            print(
+                                "登入斷路器狀態落地 FAILED"
+                                f"（{type(marker_exc).__name__}）",
+                                flush=True,
+                            )
+                    runtime.set_context(
+                        service_status="error",
+                        login_circuit_open=True,
+                        login_failure_count=consecutive_login_failures,
+                    )
+                    runtime.publish()
+                    print(
+                        "登入連續失敗達 "
+                        f"{LOGIN_MAX_CONSECUTIVE_FAILURES} 次；"
+                        "本日斷路器已開啟，不再嘗試券商登入",
+                        flush=True,
+                    )
+                    break
                 if taipei_now() >= (
                     end_at
                     + timedelta(seconds=SNAPSHOT_AFTER_END_SECONDS)
                 ):
                     break
-                if control is not None:
-                    if control.wait_for_change(
-                        stop_event,
-                        LOGIN_RETRY_SECONDS,
-                    ):
-                        break
-                elif stop_wait(stop_event, LOGIN_RETRY_SECONDS):
+                retry_seconds = (
+                    min(
+                        LOGIN_RETRY_MAX_SECONDS,
+                        LOGIN_RETRY_SECONDS
+                        * (2 ** (consecutive_login_failures - 1)),
+                    )
+                    if is_login_failure
+                    else LOGIN_RETRY_SECONDS
+                )
+                print(
+                    f"{retry_seconds:g} 秒後重試；"
+                    "退避只接受服務停止事件",
+                    flush=True,
+                )
+                if stop_wait(stop_event, retry_seconds):
                     return
             except BaseException:
                 if control is not None:
@@ -2403,6 +2954,8 @@ def main(argv: list[str] | None = None) -> int:
     result_out = (
         relative_path(args.result_out) if args.result_out else None
     )
+    lock_manager: LiveRecordingLockManager | None = None
+    source_required = False
 
     if args.replay:
         input_path = relative_path(args.replay)
@@ -2464,6 +3017,7 @@ def main(argv: list[str] | None = None) -> int:
         source_name = "auction-replay-source"
         mode_label = f"replay={input_path.name}；speed={args.speed:g}"
     else:
+        source_required = True
         prune_history()
         start_clock, end_clock = default_clock(args.session)
         if args.start is not None and args.end is not None:
@@ -2473,6 +3027,26 @@ def main(argv: list[str] | None = None) -> int:
             start_clock,
             end_clock,
         )
+        if not args.no_record:
+            initial_record_target = live_record_target(start_at, record_out)
+            try:
+                lock_manager = LiveRecordingLockManager.acquire_for(
+                    initial_record_target
+                )
+            except LiveRecordingAlreadyActive:
+                print(
+                    "同一日 live 錄製已有其他程序持鎖；"
+                    "本程序讓位退出（未啟動 HTTP、未寫檔、未通知）",
+                    flush=True,
+                )
+                return 0
+            except OSError as exc:
+                print(
+                    "live 錄製鎖取得 FAILED"
+                    f"（{type(exc).__name__}）",
+                    flush=True,
+                )
+                return 2
         runtime = ServiceRuntime(
             session=args.session,
             window_start=start_clock.strftime("%H:%M"),
@@ -2501,6 +3075,7 @@ def main(argv: list[str] | None = None) -> int:
             record_out=record_out,
             result_out=result_out,
             control=control,
+            lock_manager=lock_manager,
         )
         source_name = "auction-live-source"
         mode_label = (
@@ -2513,6 +3088,20 @@ def main(argv: list[str] | None = None) -> int:
             )
         )
 
+    if source_required:
+        live_source_target = source_target
+        source_target = lambda: supervise_source_worker(
+            runtime,
+            live_source_target,
+            stop_event,
+        )
+
+    source = threading.Thread(
+        target=source_target,
+        name=source_name,
+        daemon=True,
+    )
+    runtime.bind_source_thread(source, required=source_required)
     publisher = threading.Thread(
         target=publish_loop,
         args=(runtime, stop_event),
@@ -2533,26 +3122,57 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as exc:
         stop_event.set()
         control.shutdown()
+        publisher.join(timeout=2)
+        if lock_manager is not None:
+            lock_manager.release()
         print(
             f"HTTP 啟動 FAILED（{type(exc).__name__}）",
             flush=True,
         )
         return 2
 
-    source = threading.Thread(
-        target=source_target,
-        name=source_name,
-        daemon=True,
-    )
-    source.start()
+    try:
+        source.start()
+        runtime.mark_source_thread_started()
+    except Exception as exc:
+        stop_event.set()
+        control.shutdown()
+        stopper = getattr(webserver, "stop_server", None)
+        if callable(stopper):
+            stopper(server)
+        else:  # pragma: no cover - 舊介面相容
+            server.shutdown()
+            server.server_close()
+        publisher.join(timeout=2)
+        if lock_manager is not None:
+            lock_manager.release()
+        print(
+            f"source thread 啟動 FAILED（{type(exc).__name__}）",
+            flush=True,
+        )
+        return 2
     print(
         f"試撮偵測器已啟動：http://{args.host}:{args.port}/；{mode_label}",
         flush=True,
     )
 
+    source_failure_reported = False
     try:
         while not stop_event.wait(0.5):
-            pass
+            if (
+                source_required
+                and not source.is_alive()
+                and not source_failure_reported
+            ):
+                runtime.set_context(service_status="error")
+                runtime.update_source_health(worker_alive=False)
+                runtime.publish()
+                print(
+                    "live source thread 已停止；"
+                    "/api/state 已標示 source_alive=false",
+                    flush=True,
+                )
+                source_failure_reported = True
     except KeyboardInterrupt:
         stop_event.set()
     finally:
@@ -2566,6 +3186,8 @@ def main(argv: list[str] | None = None) -> int:
             server.server_close()
         source.join(timeout=10)
         publisher.join(timeout=2)
+        if lock_manager is not None:
+            lock_manager.release()
     print("試撮偵測器已停止", flush=True)
     return 0
 

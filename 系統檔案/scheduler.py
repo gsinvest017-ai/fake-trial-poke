@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import msvcrt
 import os
@@ -15,6 +16,9 @@ import socket
 import subprocess
 import sys
 import time
+import urllib.error
+import urllib.request
+from dataclasses import dataclass
 from datetime import date, datetime, time as clock_time, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -35,8 +39,21 @@ SERVICE_PORT = 8900
 POLL_SECONDS = 30.0
 ERROR_RETRY_SECONDS = 10.0
 STARTUP_WAIT_SECONDS = 10.0
+HEALTHY_DRIVER_STATUSES = {"idle", "armed", "closed"}
 
 LOGGER = logging.getLogger("service_watchdog")
+
+
+@dataclass(frozen=True)
+class ServiceHealth:
+    listening: bool
+    api_ok: bool
+    healthy: bool
+    service_status: str | None
+    source_alive: bool
+    recording: bool
+    login_circuit_open: bool
+    detail: str | None = None
 
 
 def configure_output() -> None:
@@ -80,7 +97,7 @@ def parse_clock(value: str) -> clock_time:
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "平日定時確認即時偵測器服務是否監聽 127.0.0.1:8900，"
+            "平日定時確認即時偵測器服務的 live 驅動與錄製健康，"
             "必要時啟動 service.py"
         )
     )
@@ -143,6 +160,77 @@ def service_is_listening() -> bool:
         return False
 
 
+def get_service_health() -> ServiceHealth:
+    listening = service_is_listening()
+    try:
+        with urllib.request.urlopen(
+            f"http://{SERVICE_HOST}:{SERVICE_PORT}/api/state",
+            timeout=2.0,
+        ) as response:
+            if int(getattr(response, "status", 200)) != 200:
+                raise RuntimeError("api/state did not return HTTP 200")
+            payload = json.loads(response.read().decode("utf-8"))
+    except (
+        OSError,
+        ValueError,
+        TypeError,
+        RuntimeError,
+        urllib.error.URLError,
+    ) as exc:
+        return ServiceHealth(
+            listening=listening,
+            api_ok=False,
+            healthy=False,
+            service_status=None,
+            source_alive=False,
+            recording=False,
+            login_circuit_open=False,
+            detail=type(exc).__name__,
+        )
+
+    if not isinstance(payload, dict):
+        return ServiceHealth(
+            listening=listening,
+            api_ok=False,
+            healthy=False,
+            service_status=None,
+            source_alive=False,
+            recording=False,
+            login_circuit_open=False,
+            detail="InvalidStatePayload",
+        )
+
+    raw_status = payload.get("service_status")
+    service_status = (
+        str(raw_status).strip().lower()
+        if isinstance(raw_status, str)
+        else None
+    )
+    source_alive = payload.get("source_alive") is True
+    recording = payload.get("recording") is True
+    login_circuit_open = payload.get("login_circuit_open") is True
+    auto_record_enabled = payload.get("auto_record_enabled") is not False
+    status_healthy = (
+        service_status in HEALTHY_DRIVER_STATUSES
+        or (service_status == "live" and recording)
+    )
+    healthy = bool(
+        source_alive
+        and auto_record_enabled
+        and status_healthy
+        and not login_circuit_open
+    )
+    return ServiceHealth(
+        listening=listening,
+        api_ok=True,
+        healthy=healthy,
+        service_status=service_status,
+        source_alive=source_alive,
+        recording=recording,
+        login_circuit_open=login_circuit_open,
+    )
+
+
 def acquire_instance_lock() -> Any:
     """取得 Windows 檔案鎖；handle 必須在看門狗常駐期間保持開啟。"""
     handle = LOCK_PATH.open("a+b")
@@ -176,9 +264,9 @@ def start_service() -> subprocess.Popen[bytes]:
     command = [sys.executable, str(SERVICE_PATH)]
     creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
     LOGGER.info(
-        "PORT %s 尚未監聽，啟動 %s",
-        SERVICE_PORT,
+        "未偵測到健康 live 錄製服務，啟動 %s（PORT %s）",
         SERVICE_PATH.name,
+        SERVICE_PORT,
     )
     return subprocess.Popen(
         command,
@@ -188,15 +276,15 @@ def start_service() -> subprocess.Popen[bytes]:
     )
 
 
-def wait_until_listening(process: subprocess.Popen[bytes]) -> bool:
+def wait_until_healthy(process: subprocess.Popen[bytes]) -> bool:
     deadline = time.monotonic() + STARTUP_WAIT_SECONDS
     while time.monotonic() < deadline:
-        if service_is_listening():
+        if get_service_health().healthy:
             return True
         if process.poll() is not None:
             return False
         time.sleep(0.2)
-    return service_is_listening()
+    return get_service_health().healthy
 
 
 def ensure_service() -> int:
@@ -211,12 +299,29 @@ def ensure_service() -> int:
         LOGGER.info("明日自動錄製已關閉；今日不啟動 service.py")
         return 0
 
-    if service_is_listening():
+    health = get_service_health()
+    if health.healthy:
         LOGGER.info(
-            "PORT %s 已在監聽，服務已啟動；跳過",
+            "live 錄製服務健康；PORT=%s status=%s "
+            "source_alive=%s recording=%s；跳過",
             SERVICE_PORT,
+            health.service_status,
+            health.source_alive,
+            health.recording,
         )
         return 0
+    if health.listening:
+        LOGGER.error(
+            "PORT %s 雖在監聽但 live 錄製不健康；"
+            "status=%s source_alive=%s recording=%s "
+            "login_circuit_open=%s；拒絕誤判健康或重複綁埠",
+            SERVICE_PORT,
+            health.service_status,
+            health.source_alive,
+            health.recording,
+            health.login_circuit_open,
+        )
+        return 1
 
     try:
         process = start_service()
@@ -224,18 +329,23 @@ def ensure_service() -> int:
         LOGGER.exception("無法啟動 service.py")
         return 1
 
-    if wait_until_listening(process):
+    if wait_until_healthy(process):
+        started_health = get_service_health()
         LOGGER.info(
-            "服務已開始監聽 http://%s:%s/",
+            "服務已健康啟動 http://%s:%s/；status=%s "
+            "source_alive=%s recording=%s",
             SERVICE_HOST,
             SERVICE_PORT,
+            started_health.service_status,
+            started_health.source_alive,
+            started_health.recording,
         )
         return 0
 
     returncode = process.poll()
     if returncode is None:
         LOGGER.error(
-            "啟動後 %s 秒內仍未監聽 PORT %s",
+            "啟動後 %s 秒內仍未通過 live 驅動／錄製健康檢查（PORT %s）",
             int(STARTUP_WAIT_SECONDS),
             SERVICE_PORT,
         )

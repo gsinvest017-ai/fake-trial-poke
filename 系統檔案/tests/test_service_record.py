@@ -33,6 +33,12 @@ STATE_CONTRACT_FIELDS = {
     "last_event_age_sec",
     "login_ok",
     "subscribe_ok",
+    "source_alive",
+    "source_thread_alive",
+    "source_heartbeat_at",
+    "source_heartbeat_age_sec",
+    "source_restart_count",
+    "source_error",
     "today_recording",
 }
 TODAY_RECORDING_FIELDS = {
@@ -729,6 +735,7 @@ class ServiceRecordTests(unittest.TestCase):
                     record_enabled=True,
                     record_out=record_path,
                     result_out=result_path,
+                    notification_owner=True,
                 )
 
             self.assertTrue(notification_started.wait(timeout=1))
@@ -1089,6 +1096,326 @@ class ServiceRecordTests(unittest.TestCase):
         self.assertEqual(state["service_status"], "error")
         self.assertTrue(state["login_ok"])
         self.assertFalse(state["subscribe_ok"])
+
+    def test_source_supervisor_restarts_non_live_source_error(
+        self,
+    ) -> None:
+        runtime, _metadata = self.make_runtime()
+        stop_event = threading.Event()
+        calls: list[int] = []
+
+        def flaky_worker() -> None:
+            calls.append(len(calls) + 1)
+            if len(calls) == 1:
+                raise ValueError("受控的一般例外")
+            stop_event.set()
+
+        with mock.patch("builtins.print") as print_output:
+            service.supervise_source_worker(
+                runtime,
+                flaky_worker,
+                stop_event,
+                max_consecutive_failures=3,
+                retry_base_seconds=0,
+                retry_max_seconds=0,
+                stable_reset_seconds=60,
+                heartbeat_interval_seconds=0.01,
+            )
+
+        self.assertEqual(calls, [1, 2])
+        state = runtime.publish()
+        self.assertEqual(state["source_restart_count"], 1)
+        self.assertTrue(
+            any(
+                "ValueError" in str(call)
+                for call in print_output.call_args_list
+            )
+        )
+
+    def test_dead_live_source_is_error_through_api(self) -> None:
+        runtime, _metadata = self.make_runtime()
+        source_thread = threading.Thread(target=lambda: None)
+        runtime.bind_source_thread(source_thread, required=True)
+        source_thread.start()
+        runtime.mark_source_thread_started()
+        source_thread.join(timeout=1)
+        runtime.update_source_health(
+            worker_alive=False,
+            error_type="InjectedWorkerDeath",
+        )
+        state = runtime.publish()
+
+        self.assertEqual(state["service_status"], "error")
+        self.assertFalse(state["source_alive"])
+        self.assertFalse(state["source_thread_alive"])
+        self.assertEqual(state["source_error"], "InjectedWorkerDeath")
+
+        server = webserver.start_server(runtime.shared, port=0)
+        try:
+            port = int(server.server_address[1])
+            with urllib.request.urlopen(
+                f"http://127.0.0.1:{port}/api/state",
+                timeout=2,
+            ) as response:
+                api_state = json.loads(response.read().decode("utf-8"))
+        finally:
+            webserver.stop_server(server)
+
+        self.assertEqual(api_state["service_status"], "error")
+        self.assertFalse(api_state["source_alive"])
+        self.assertFalse(api_state["source_thread_alive"])
+
+    def test_stop_wait_ignores_recording_control_changed_event(self) -> None:
+        runtime, _metadata = self.make_runtime()
+        control = service.RecordingControl(
+            runtime,
+            mode="live",
+            auto_record_enabled=True,
+            session="preopen",
+            start_clock=datetime_time(8, 30),
+            end_clock=datetime_time(9, 0),
+        )
+        session_stop = control.begin_live_session(service.taipei_now().date())
+        self.assertIsNotNone(session_stop)
+        control.end_session(session_stop)
+
+        stop_event = threading.Event()
+        started_at = service.time.monotonic()
+        interrupted = service.stop_wait(stop_event, 0.05)
+        elapsed = service.time.monotonic() - started_at
+
+        self.assertFalse(interrupted)
+        self.assertGreaterEqual(elapsed, 0.04)
+        self.assertEqual(service.LOGIN_RETRY_SECONDS, 30.0)
+
+    def test_login_failure_uses_stop_only_exponential_backoff(
+        self,
+    ) -> None:
+        runtime, _metadata = self.make_runtime()
+        control = service.RecordingControl(
+            runtime,
+            mode="live",
+            auto_record_enabled=True,
+            session="preopen",
+            start_clock=datetime_time(8, 30),
+            end_clock=datetime_time(9, 0),
+        )
+        stop_event = threading.Event()
+        now = service.taipei_now()
+        start_at = now - timedelta(minutes=1)
+        end_at = now + timedelta(minutes=1)
+        observed_waits: list[float] = []
+
+        def stop_after_first_backoff(
+            event: threading.Event,
+            seconds: float,
+        ) -> bool:
+            self.assertIs(event, stop_event)
+            observed_waits.append(seconds)
+            event.set()
+            return True
+
+        with (
+            mock.patch.object(
+                service,
+                "upcoming_window",
+                return_value=(start_at, end_at),
+            ),
+            mock.patch.object(
+                service,
+                "run_one_live_window",
+                side_effect=service.LiveLoginError("login FAILED"),
+            ) as run_window,
+            mock.patch.object(
+                service,
+                "stop_wait",
+                side_effect=stop_after_first_backoff,
+            ),
+            mock.patch.object(
+                control,
+                "wait_for_change",
+                wraps=control.wait_for_change,
+            ) as changed_wait,
+        ):
+            service.live_worker(
+                runtime,
+                session="preopen",
+                start_clock=datetime_time(8, 30),
+                end_clock=datetime_time(9, 0),
+                universe_spec=None,
+                stop_event=stop_event,
+                record_enabled=False,
+                record_out=None,
+                control=control,
+            )
+
+        run_window.assert_called_once()
+        changed_wait.assert_not_called()
+        self.assertEqual(observed_waits, [30.0])
+
+    def test_login_circuit_opens_after_max_failures_and_persists(
+        self,
+    ) -> None:
+        runtime, _metadata = self.make_runtime()
+        control = service.RecordingControl(
+            runtime,
+            mode="live",
+            auto_record_enabled=True,
+            session="preopen",
+            start_clock=datetime_time(8, 30),
+            end_clock=datetime_time(9, 0),
+        )
+        stop_event = threading.Event()
+        now = service.taipei_now()
+        start_at = now - timedelta(minutes=1)
+        end_at = now + timedelta(minutes=1)
+        observed_waits: list[float] = []
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            record_path = pathlib.Path(temp_dir) / "auction.jsonl"
+            lock_manager = service.LiveRecordingLockManager.acquire_for(
+                record_path
+            )
+
+            def fake_stop_wait(
+                event: threading.Event,
+                seconds: float,
+            ) -> bool:
+                observed_waits.append(seconds)
+                if len(observed_waits) > 4:
+                    event.set()
+                    return True
+                return False
+
+            try:
+                with (
+                    mock.patch.object(
+                        service,
+                        "upcoming_window",
+                        return_value=(start_at, end_at),
+                    ),
+                    mock.patch.object(
+                        service,
+                        "run_one_live_window",
+                        side_effect=service.LiveLoginError(
+                            "受控登入失敗"
+                        ),
+                    ) as run_window,
+                    mock.patch.object(
+                        service,
+                        "stop_wait",
+                        side_effect=fake_stop_wait,
+                    ),
+                ):
+                    service.live_worker(
+                        runtime,
+                        session="preopen",
+                        start_clock=datetime_time(8, 30),
+                        end_clock=datetime_time(9, 0),
+                        universe_spec=None,
+                        stop_event=stop_event,
+                        record_enabled=True,
+                        record_out=record_path,
+                        control=control,
+                        lock_manager=lock_manager,
+                    )
+            finally:
+                lock_manager.release()
+
+            marker = service.read_login_circuit(
+                record_path,
+                start_at.date(),
+            )
+
+        self.assertEqual(
+            run_window.call_count,
+            service.LOGIN_MAX_CONSECUTIVE_FAILURES,
+        )
+        self.assertEqual(observed_waits[:4], [30.0, 60.0, 120.0, 240.0])
+        self.assertIsNotNone(marker)
+        self.assertEqual(
+            marker["failure_count"],
+            service.LOGIN_MAX_CONSECUTIVE_FAILURES,
+        )
+        state = runtime.publish()
+        self.assertEqual(state["service_status"], "error")
+        self.assertTrue(state["login_circuit_open"])
+        self.assertEqual(
+            state["login_failure_count"],
+            service.LOGIN_MAX_CONSECUTIVE_FAILURES,
+        )
+
+    def test_live_recording_lock_rejects_second_process_path(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            record_path = pathlib.Path(temp_dir) / "auction.jsonl"
+            first = service.LiveRecordingLockManager.acquire_for(record_path)
+            try:
+                with self.assertRaises(
+                    service.LiveRecordingAlreadyActive
+                ):
+                    service.LiveRecordingLockManager.acquire_for(record_path)
+            finally:
+                first.release()
+
+            self.assertFalse(record_path.exists())
+            self.assertTrue(
+                (record_path.parent / ".record.lock").exists()
+            )
+
+    def test_duplicate_live_main_yields_before_http_write_or_notify(
+        self,
+    ) -> None:
+        now = service.taipei_now()
+        start_at = now.replace(second=0, microsecond=0)
+        end_at = start_at + timedelta(minutes=30)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            record_path = pathlib.Path(temp_dir) / "auction.jsonl"
+            first = service.LiveRecordingLockManager.acquire_for(record_path)
+            try:
+                with (
+                    mock.patch.object(
+                        service,
+                        "upcoming_window",
+                        return_value=(start_at, end_at),
+                    ),
+                    mock.patch.object(
+                        service,
+                        "prune_history",
+                    ),
+                    mock.patch.object(
+                        service.control_state,
+                        "get_auto_record_enabled",
+                        return_value=True,
+                    ),
+                    mock.patch.object(
+                        webserver,
+                        "start_server",
+                    ) as start_server,
+                    mock.patch.object(
+                        service,
+                        "start_telegram_result_notification",
+                    ) as start_notification,
+                ):
+                    exit_code = service.main(
+                        [
+                            "--host",
+                            "127.0.0.1",
+                            "--port",
+                            "8927",
+                            "--record-out",
+                            str(record_path),
+                        ]
+                    )
+            finally:
+                first.release()
+            record_created_before_cleanup = record_path.exists()
+
+        self.assertEqual(exit_code, 0)
+        start_server.assert_not_called()
+        start_notification.assert_not_called()
+        self.assertFalse(record_created_before_cleanup)
 
     def test_stale_stream_reports_degraded_through_api(self) -> None:
         runtime, _metadata = self.make_runtime(stale_after_seconds=1.0)
