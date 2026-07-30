@@ -13,6 +13,11 @@ $ScriptPath = $MyInvocation.MyCommand.Path
 $ServicePath = Join-Path -Path $ProjectDir -ChildPath "service.py"
 $LogDir = Join-Path -Path $ProjectDir -ChildPath "log"
 $LaunchTimeoutSeconds = 20
+$InteractiveTaskWarning = (
+    "目前為互動式排程：電腦需保持登入才會於 08:25 錄製；" +
+    "若要開機未登入也自動錄製，請以系統管理員身分重新執行安裝" +
+    "(安裝環境.bat/一鍵啟動)。"
+)
 
 function Resolve-Python {
     $localPython = Join-Path -Path $ProjectDir -ChildPath (
@@ -513,7 +518,7 @@ function Set-ReliableTaskSettings {
     }
 
     # 舊版環境可能沒有 ScheduledTasks 模組；用 Task Scheduler COM
-    # 保留 WakeToRun / StartWhenAvailable，不把任務改回互動式登入。
+    # 保留既有登入類型並更新 WakeToRun / StartWhenAvailable。
     $scheduler = New-Object -ComObject "Schedule.Service"
     $scheduler.Connect()
     $rootFolder = $scheduler.GetFolder("\")
@@ -524,13 +529,7 @@ function Set-ReliableTaskSettings {
     $definition.Settings.WakeToRun = $true
     $definition.Settings.StartWhenAvailable = $true
     $principal = $definition.Principal
-    $taskLogonS4U = 2
-    if ([int]$principal.LogonType -ne $taskLogonS4U) {
-        throw (
-            "拒絕更新排程設定：現有 Principal.LogonType=" +
-            "$($principal.LogonType)，不是 S4U。"
-        )
-    }
+    $taskLogonType = [int]$principal.LogonType
     $taskCreateOrUpdate = 6
     $rootFolder.RegisterTaskDefinition(
         $TaskName,
@@ -538,7 +537,7 @@ function Set-ReliableTaskSettings {
         $taskCreateOrUpdate,
         $principal.UserId,
         $null,
-        $taskLogonS4U,
+        $taskLogonType,
         $null
     ) | Out-Null
 }
@@ -604,12 +603,18 @@ $taskAction = (
 
 switch ($Mode) {
     "Register" {
-        $currentUser = (
-            [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+        $currentIdentity = (
+            [System.Security.Principal.WindowsIdentity]::GetCurrent()
         )
+        $currentUser = $currentIdentity.Name
         if ([string]::IsNullOrWhiteSpace($currentUser)) {
             throw "無法取得目前 Windows 使用者，拒絕註冊排程。"
         }
+        $currentPrincipal = New-Object `
+            System.Security.Principal.WindowsPrincipal($currentIdentity)
+        $isAdministrator = $currentPrincipal.IsInRole(
+            [System.Security.Principal.WindowsBuiltInRole]::Administrator
+        )
 
         $requiredScheduledTaskCommands = @(
             "New-ScheduledTaskAction",
@@ -626,8 +631,14 @@ switch ($Mode) {
                     )
                 }
         )
+        $scheduledTasksAvailable = (
+            $missingScheduledTaskCommands.Count -eq 0
+        )
         $registrationMethod = $null
-        if ($missingScheduledTaskCommands.Count -eq 0) {
+        $scheduledAction = $null
+        $scheduledTrigger = $null
+        $scheduledSettings = $null
+        if ($scheduledTasksAvailable) {
             try {
                 $scheduledAction = New-ScheduledTaskAction `
                     -Execute "powershell.exe" `
@@ -644,15 +655,28 @@ switch ($Mode) {
                         "Friday"
                     ) `
                     -At "08:25"
-                $scheduledPrincipal = New-ScheduledTaskPrincipal `
-                    -UserId $currentUser `
-                    -LogonType S4U `
-                    -RunLevel Limited
                 $scheduledSettings = New-ScheduledTaskSettingsSet `
                     -AllowStartIfOnBatteries `
                     -DontStopIfGoingOnBatteries `
                     -WakeToRun `
                     -StartWhenAvailable
+            }
+            catch {
+                $scheduledTasksAvailable = $false
+                Write-Warning (
+                    "ScheduledTasks 元件初始化失敗，將安全降級為" +
+                    "不指定執行使用者的 schtasks 互動式排程；原因：" +
+                    "$($_.Exception.Message)"
+                )
+            }
+        }
+
+        if ($isAdministrator -and $scheduledTasksAvailable) {
+            try {
+                $scheduledPrincipal = New-ScheduledTaskPrincipal `
+                    -UserId $currentUser `
+                    -LogonType S4U `
+                    -RunLevel Limited
                 Register-ScheduledTask `
                     -TaskName $TaskName `
                     -Action $scheduledAction `
@@ -665,17 +689,50 @@ switch ($Mode) {
             }
             catch {
                 Write-Warning (
-                    "ScheduledTasks S4U 註冊不可用，改用 schtasks " +
-                    "/NP 免密碼備援；原因：$($_.Exception.Message)"
+                    "ScheduledTasks S4U 註冊不可用，將安全降級為" +
+                    "互動式排程；原因：$($_.Exception.Message)"
                 )
             }
         }
-        else {
+        elseif (-not $isAdministrator) {
+            Write-Output (
+                "目前未以系統管理員身分執行；為避免 UAC 或密碼提示，" +
+                "略過 S4U，直接註冊互動式排程。"
+            )
+        }
+        elseif ($missingScheduledTaskCommands.Count -gt 0) {
             Write-Warning (
                 "缺少 ScheduledTasks 指令（" +
                 "$($missingScheduledTaskCommands -join ', ')），" +
-                "改用 schtasks /NP 免密碼備援。"
+                "無法註冊 S4U，將安全降級為互動式排程。"
             )
+        }
+
+        if ($null -eq $registrationMethod) {
+            if ($scheduledTasksAvailable) {
+                try {
+                    $scheduledPrincipal = New-ScheduledTaskPrincipal `
+                        -UserId $currentUser `
+                        -LogonType Interactive `
+                        -RunLevel Limited
+                    Register-ScheduledTask `
+                        -TaskName $TaskName `
+                        -Action $scheduledAction `
+                        -Trigger $scheduledTrigger `
+                        -Principal $scheduledPrincipal `
+                        -Settings $scheduledSettings `
+                        -Force `
+                        -ErrorAction Stop | Out-Null
+                    $registrationMethod = "ScheduledTasks/Interactive"
+                }
+                catch {
+                    Write-Warning (
+                        "ScheduledTasks 互動式註冊不可用，改用不指定" +
+                        "執行使用者的 schtasks 備援；原因：" +
+                        "$($_.Exception.Message)"
+                    )
+                }
+            }
         }
 
         if ($null -eq $registrationMethod) {
@@ -686,20 +743,18 @@ switch ($Mode) {
                 /D MON,TUE,WED,THU,FRI `
                 /ST 08:25 `
                 /TR $taskAction `
-                /RU $currentUser `
-                /NP `
                 /RL LIMITED `
                 /F
             if ($LASTEXITCODE -ne 0) {
                 Write-Warning (
-                    "無法建立免登入排程；未退回互動式任務。"
+                    "無法建立互動式排程。"
                 )
                 throw (
-                    "排程免登入註冊失敗" +
-                    "（schtasks /NP exit=$LASTEXITCODE）"
+                    "排程互動式註冊失敗" +
+                    "（schtasks exit=$LASTEXITCODE）"
                 )
             }
-            $registrationMethod = "schtasks/NP"
+            $registrationMethod = "schtasks/Interactive"
         }
 
         Set-ReliableTaskSettings
@@ -708,22 +763,32 @@ switch ($Mode) {
             "排程 Principal.LogonType=$registeredLogonType；" +
             "註冊方式=$registrationMethod"
         )
-        if ($registeredLogonType -ne "S4U") {
-            Write-Warning (
-                "排程未通過免登入驗證：" +
-                "Principal.LogonType=$registeredLogonType；" +
-                "不會靜默保留為互動式任務。"
-            )
+        $isS4UTask = $registeredLogonType -eq "S4U"
+        $isInteractiveTask = $registeredLogonType -in @(
+            "Interactive",
+            "InteractiveToken"
+        )
+        if (-not $isS4UTask -and -not $isInteractiveTask) {
             throw (
-                "排程 Principal.LogonType 必須為 S4U，" +
+                "排程 Principal.LogonType 無效；預期 S4U 或 Interactive，" +
                 "實際為 $registeredLogonType。"
             )
         }
-        Write-Output (
-            "已註冊：$TaskName（週一至週五 08:25；" +
-            "service.py live；PORT $Port；免登入 S4U；" +
-            "Limited；可用電池；WakeToRun；StartWhenAvailable）"
-        )
+        if ($isS4UTask) {
+            Write-Output (
+                "已註冊：$TaskName（週一至週五 08:25；" +
+                "service.py live；PORT $Port；免登入 S4U；" +
+                "Limited；可用電池；WakeToRun；StartWhenAvailable）"
+            )
+        }
+        else {
+            Write-Warning $InteractiveTaskWarning
+            Write-Output (
+                "已註冊：$TaskName（週一至週五 08:25；" +
+                "service.py live；PORT $Port；互動式；需保持登入；" +
+                "Limited；可用電池；WakeToRun；StartWhenAvailable）"
+            )
+        }
         if ($RunNow) {
             & schtasks.exe /Run /TN $TaskName
             if ($LASTEXITCODE -ne 0) {
