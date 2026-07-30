@@ -1,0 +1,9 @@
+build/
+dist/
+static/
+*.spec
+
+# Local licence delivery material must never be published.
+delivery/
+*.licence.txt
+*_private.key

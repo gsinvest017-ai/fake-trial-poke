@@ -3368,6 +3368,27 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="台股試撮即時偵測器常駐服務（行情唯讀）"
     )
+    licence = parser.add_argument_group("授權")
+    licence.add_argument(
+        "--activate",
+        metavar="KEY",
+        help="兌換 licence key 後結束",
+    )
+    licence.add_argument(
+        "--licence-email",
+        metavar="EMAIL",
+        help="被授權人 email（搭配 --activate）",
+    )
+    licence.add_argument(
+        "--licence-status",
+        action="store_true",
+        help="以 JSON 顯示 licence 狀態後結束",
+    )
+    licence.add_argument(
+        "--machine-id",
+        action="store_true",
+        help="顯示本機指紋後結束",
+    )
     parser.add_argument(
         "--replay",
         metavar="PATH",
@@ -3438,6 +3459,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def install_stop_handlers(stop_event: threading.Event) -> None:
+    if threading.current_thread() is not threading.main_thread():
+        return
+
     def request_stop(signum: int, frame: Any) -> None:
         del signum, frame
         stop_event.set()
@@ -3450,6 +3474,33 @@ def install_stop_handlers(stop_event: threading.Event) -> None:
 def main(argv: list[str] | None = None) -> int:
     configure_output()
     args = parse_args(argv)
+
+    import licensing
+
+    if args.machine_id:
+        print(licensing.machine_id())
+        return 0
+    if args.activate:
+        ok, message = licensing.activate(
+            args.activate,
+            args.licence_email or "",
+        )
+        print(f"{'OK' if ok else 'FAILED'}: {message}")
+        return 0 if ok else 1
+    if args.licence_status:
+        print(
+            json.dumps(
+                licensing.check().to_dict(),
+                indent=2,
+                ensure_ascii=False,
+            )
+        )
+        return 0
+
+    # 開發執行預設只回報狀態；PyInstaller frozen release 會自動強制。
+    # 必須在開 port、登入 Shioaji 或啟動背景執行緒之前完成驗證。
+    licensing.enforce_or_exit()
+
     stop_event = threading.Event()
     install_stop_handlers(stop_event)
     control_error = False

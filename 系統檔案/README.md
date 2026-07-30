@@ -9,6 +9,21 @@ http://127.0.0.1:8900/
 
 ## 最短操作路徑
 
+### Release 版授權
+
+GitHub Release 的 `fake-trial-poke.exe` 會在啟動服務、開啟本機 port
+或登入 Shioaji 前驗證 KEYGUARD licence。第一次收到 licence key 時，
+請在安裝目錄的 PowerShell 執行：
+
+```powershell
+.\fake-trial-poke.exe --activate "<KG1 licence key>" `
+  --licence-email "buyer@example.com"
+.\fake-trial-poke.exe --licence-status
+```
+
+正式 licence 和未啟用 trial 都有 expiration；到期後 release 不會啟動。
+原始碼開發模式不會阻擋，避免開發環境因本機授權狀態中斷。
+
 ### 1. 第一次使用：直接一鍵啟動
 
 雙擊上層資料夾的 `一鍵啟動.vbs`。第一次使用時會出現一次 Windows UAC
