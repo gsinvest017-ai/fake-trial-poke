@@ -18,6 +18,8 @@ from pathlib import Path
 from typing import Any, Iterable
 from zoneinfo import ZoneInfo
 
+import jsonl_quality
+
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
@@ -133,36 +135,65 @@ def read_json(path: Path) -> Any:
 
 def read_jsonl(path: Path) -> list[dict[str, Any]]:
     events: list[dict[str, Any]] = []
+    nonempty_lines = 0
+    bad_lines = 0
     with path.open("r", encoding="utf-8-sig") as handle:
         for line_number, raw_line in enumerate(handle, start=1):
             line = raw_line.strip()
             if not line:
                 continue
+            nonempty_lines += 1
             try:
                 item = json.loads(line)
-            except json.JSONDecodeError as exc:
-                raise ValueError(
-                    f"{path.name} 第 {line_number} 行不是合法 JSON"
-                ) from exc
+            except json.JSONDecodeError:
+                bad_lines += 1
+                jsonl_quality.warn_bad_line(
+                    path,
+                    line_number,
+                    "不是合法 JSON",
+                )
+                continue
             if not isinstance(item, dict):
-                raise ValueError(
-                    f"{path.name} 第 {line_number} 行必須是 JSON object"
+                bad_lines += 1
+                jsonl_quality.warn_bad_line(
+                    path,
+                    line_number,
+                    "不是 JSON object",
                 )
+                continue
             if item.get("kind") not in {"tick", "bidask", "snapshot"}:
-                raise ValueError(
-                    f"{path.name} 第 {line_number} 行 kind 必須為 "
-                    "tick/bidask/snapshot"
+                bad_lines += 1
+                jsonl_quality.warn_bad_line(
+                    path,
+                    line_number,
+                    "kind 不是 tick/bidask/snapshot",
                 )
+                continue
             code = str(item.get("code") or "").strip()
             if not code:
-                raise ValueError(f"{path.name} 第 {line_number} 行缺少 code")
+                bad_lines += 1
+                jsonl_quality.warn_bad_line(
+                    path,
+                    line_number,
+                    "缺少 code",
+                )
+                continue
             item["_dt"] = parse_ts(item.get("ts"))
             if item["_dt"] is None:
-                raise ValueError(
-                    f"{path.name} 第 {line_number} 行 ts 不是合法 ISO 時間"
+                bad_lines += 1
+                jsonl_quality.warn_bad_line(
+                    path,
+                    line_number,
+                    "ts 不是合法 ISO 時間",
                 )
+                continue
             item["code"] = code
             events.append(item)
+    jsonl_quality.enforce_quality(
+        path,
+        nonempty_lines=nonempty_lines,
+        bad_lines=bad_lines,
+    )
     return events
 
 
@@ -1149,6 +1180,17 @@ def main(argv: list[str] | None = None) -> int:
             drop_min_absolute=args.drop_min_absolute,
             drop_lookback_seconds=args.drop_lookback_sec,
         )
+        if (
+            not args.sample
+            and (
+                not input_path.with_suffix(".meta.json").is_file()
+                or not metadata_by_code(metadata)
+            )
+            and all(stock.get("limit_up") is None for stock in result["stocks"])
+        ):
+            raise ValueError(
+                "缺少 meta.json，且全體 limit_up 不可得、判定不可信"
+            )
         validate_result(result, sample=args.sample)
         write_result(output_path, result)
     except (OSError, ValueError, AssertionError, json.JSONDecodeError) as exc:

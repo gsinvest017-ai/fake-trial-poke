@@ -92,6 +92,7 @@ STATUS_LABELS = {
     "locked_held": "鎖漲停守住",
     "touched": "曾觸漲停",
     "watching": "觀察中",
+    "no_data": "未收到報價",
     "none": "無法判定",
 }
 STATUS_RANK = {
@@ -99,7 +100,8 @@ STATUS_RANK = {
     "locked_held": 1,
     "touched": 2,
     "watching": 3,
-    "none": 4,
+    "no_data": 4,
+    "none": 5,
 }
 SERVICE_STATUSES = {"idle", "armed", "live", "closed", "replay"}
 
@@ -691,6 +693,11 @@ class Detector:
 
         state = self._state_for_event(event)
         window_start, window_end = self._window_for(event_at)
+        if (
+            kind in {"bidask", "tick"}
+            and window_start <= event_at < window_end
+        ):
+            state.seen_stream = True
         if kind == "bidask":
             self._process_bidask(
                 state, event, event_at, window_start, window_end
@@ -701,6 +708,15 @@ class Detector:
             self._process_opening_tick(state, event, event_at, window_end)
         self._recompute(state)
         return self._public_stock(state)
+
+    def finalize_no_data(self) -> list[str]:
+        """Mark subscribed stocks with zero in-window quote events."""
+        missing_codes: list[str] = []
+        for state in self._stocks.values():
+            if state.watching and not state.seen_stream:
+                state.status = "no_data"
+                missing_codes.append(state.code)
+        return sorted(missing_codes)
 
     # 讓 service/replay 可以採較語意化的命名，不複製任何判定路徑。
     ingest = process_event
@@ -1019,6 +1035,7 @@ class Detector:
                 "locked_held",
                 "touched",
                 "watching",
+                "no_data",
             )
         }
         counts["anomaly"] = sum(bool(stock["anomalies"]) for stock in stocks)

@@ -39,6 +39,7 @@
 ```text
 data/
 ├─ INDEX.md
+├─ holidays.txt
 ├─ history/
 │  └─ YYYYMMDD/
 │     ├─ auction_YYYYMMDD.jsonl
@@ -57,5 +58,8 @@ data/
 - `scanner.py` 不給 `--in` 時讀取今日檔；不給 `--out` 時依資料日期將結果寫入對應日期夾。
 - `service.py --replay PATH` 永遠使用明確指定的既有路徑，不會自行改寫來源。
 - `recorder.py --smoke` 與 scanner 的 `--sample` 是測試資料，不會混入每日歷史錄製。
+- `holidays.txt` 是可人工維護的休市日清單，一行一個 `YYYY-MM-DD`；
+  目前 seed 2026 年，跨年時依證交所公告更新。清單漏列時，live 收口仍以
+  `simtrade` 盤前事件數兜底判定 `no_session`。
 
 **今日（2026-07-24）抓取／錄製的真實資料已清楚收在 `history/20260724/`；未來每日新資料也會自動遵循相同慣例，不再散落於 `data/` 根目錄。**

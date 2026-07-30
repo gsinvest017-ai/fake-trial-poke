@@ -603,6 +603,7 @@ def contract_meta(code: str, contract: Any) -> dict[str, Any]:
         "name": normalize_code(getattr(contract, "name", "")),
         "reference": to_float(getattr(contract, "reference", None)),
         "limit_up": to_float(getattr(contract, "limit_up", None)),
+        "limit_down": to_float(getattr(contract, "limit_down", None)),
     }
 
 

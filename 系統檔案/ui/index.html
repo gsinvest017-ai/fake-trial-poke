@@ -409,6 +409,12 @@
       box-shadow: 0 8px 22px rgba(55, 44, 25, 0.05);
     }
 
+    .record-control.control-error {
+      border-color: rgba(200, 50, 42, 0.55);
+      background: var(--fake-soft);
+      box-shadow: 0 8px 24px rgba(200, 50, 42, 0.13);
+    }
+
     .record-control-title {
       margin: 0 0 5px;
       font-size: 0.94rem;
@@ -454,6 +460,13 @@
       border-color: var(--line-strong);
       background: var(--watching-soft);
       color: #5F594F;
+    }
+
+    .record-state.control-error,
+    .record-state.no_session {
+      border-color: rgba(200, 50, 42, 0.38);
+      background: var(--fake-soft);
+      color: var(--fake);
     }
 
     .auto-record-toggle {
@@ -1151,6 +1164,12 @@
       color: var(--touched);
     }
 
+    .status-badge.no_data {
+      border-color: rgba(200, 50, 42, 0.24);
+      background: var(--fake-soft);
+      color: #8D302C;
+    }
+
     .stock-body {
       display: grid;
       grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -1639,7 +1658,7 @@
       </div>
     </section>
 
-    <section class="record-control" aria-labelledby="record-control-title">
+    <section class="record-control" id="record-control" aria-labelledby="record-control-title">
       <div>
         <h2 class="record-control-title" id="record-control-title">錄製控制</h2>
         <div class="record-control-states" aria-live="polite">
@@ -1784,6 +1803,7 @@
         locked_held: { icon: "●", label: "鎖漲停守住", className: "locked_held" },
         touched: { icon: "◆", label: "曾觸漲停", className: "touched" },
         watching: { icon: "◌", label: "觀察中", className: "watching" },
+        no_data: { icon: "!", label: "未收到報價", className: "no_data" },
         none: { icon: "－", label: "尚無訊號", className: "none" }
       };
       const GRADE = {
@@ -1819,6 +1839,7 @@
         countTouched: document.getElementById("count-touched"),
         countWatching: document.getElementById("count-watching"),
         countAnomaly: document.getElementById("count-anomaly"),
+        recordControl: document.getElementById("record-control"),
         autoRecordState: document.getElementById("auto-record-state"),
         todayRecordState: document.getElementById("today-record-state"),
         autoRecordSwitch: document.getElementById("auto-record-switch"),
@@ -2370,6 +2391,7 @@
 
       function serviceLabel(service, state) {
         if (service === "error") {
+          if (state.control_error === true) return "服務異常・設定檔損壞";
           if (state.login_ok === false) return "服務異常・登入失敗";
           if (state.subscribe_ok === false) return "服務異常・訂閱失敗";
         }
@@ -2419,13 +2441,14 @@
         const recordingKnown = hasState && typeof state.recording === "boolean";
         const autoEnabled = autoKnown && state.auto_record_enabled === true;
         const recording = recordingKnown && state.recording === true;
+        const controlError = hasState && state.control_error === true;
         const todayRecording = hasState
           && state.today_recording
           && typeof state.today_recording === "object"
           ? state.today_recording
           : null;
         const todayState = todayRecording
-          && ["success", "recording", "waiting", "missed"].includes(todayRecording.state)
+          && ["success", "recording", "waiting", "missed", "no_session"].includes(todayRecording.state)
           ? todayRecording.state
           : "";
         const todayCount = todayRecording
@@ -2433,17 +2456,23 @@
           : 0;
         const todayWindow = safeText(todayRecording && todayRecording.window, "08:30–09:00");
 
-        elements.autoRecordState.textContent = autoKnown
-          ? `明天自動錄製：${autoEnabled ? "開" : "關"}`
-          : "明天自動錄製：狀態未知";
-        elements.autoRecordState.className = `record-state${autoEnabled ? " on" : ""}`;
+        elements.recordControl.classList.toggle("control-error", controlError);
+        elements.autoRecordState.textContent = controlError
+          ? "⚠ 設定檔異常、已停用自動錄製（非你主動關閉）"
+          : autoKnown
+            ? `明天自動錄製：${autoEnabled ? "開" : "關"}`
+            : "明天自動錄製：狀態未知";
+        elements.autoRecordState.className = controlError
+          ? "record-state control-error"
+          : `record-state${autoEnabled ? " on" : ""}`;
         const todayMessages = {
           success: `✅ 今日已錄製 ${todayCount} 筆（${todayWindow} 完成）`,
           recording: `🔴 錄製中 ${todayCount} 筆`,
           waiting: todayRecording && todayRecording.is_trading_day === false
             ? "⏳ 等待下一交易日"
             : `⏳ 等待今日 ${todayWindow} 窗口`,
-          missed: "❌ 今日窗口已過、未錄到（請檢查）"
+          missed: "❌ 今日窗口已過、未錄到（請檢查）",
+          no_session: "⚠ 今日無盤前試撮 session（非 success、未發判定通知）"
         };
         elements.todayRecordState.textContent = todayState
           ? todayMessages[todayState]
@@ -2452,14 +2481,26 @@
           `record-state${todayState ? ` ${todayState}` : ""}`;
 
         elements.autoRecordSwitch.checked = autoEnabled;
-        elements.autoRecordSwitch.disabled = controlBusy || !autoKnown;
+        elements.autoRecordSwitch.disabled = controlBusy || !autoKnown || controlError;
         elements.autoRecordSwitch.setAttribute(
           "aria-label",
           `明天自動錄製，目前${autoKnown ? (autoEnabled ? "開啟" : "關閉") : "狀態未知"}`
         );
-        elements.startRecordButton.disabled = controlBusy || !recordingKnown || recording;
+        elements.startRecordButton.disabled =
+          controlBusy || !recordingKnown || recording || controlError;
         elements.stopRecordButton.disabled = controlBusy || !recordingKnown || !recording;
 
+        if (controlError) {
+          setControlFeedback(
+            `設定檔異常：${safeText(state.control_error_reason, "原因未提供")}；已 fail-closed`,
+            "error",
+            "control-error"
+          );
+          return;
+        }
+        if (elements.recordControlFeedback.dataset.source === "control-error") {
+          setControlFeedback("");
+        }
         if (
           autoKnown &&
           recordingKnown &&
@@ -2476,9 +2517,16 @@
         const eventAge = rawEventAge === null || rawEventAge === undefined || rawEventAge === ""
           ? null
           : finiteNumber(rawEventAge);
+        const phase = safeText(state.phase, "");
+        const freshnessRequired =
+          service === "live" || service === "degraded" || service === "error";
+        const streamFresh =
+          eventAge !== null && service !== "degraded" && service !== "error";
 
         elements.recordingCell.className = `health-cell recording-cell${recording ? " active" : ""}`;
-        elements.recordingStatus.textContent = recording ? "錄製中" : "未錄製";
+        elements.recordingStatus.textContent = recording
+          ? phase === "postopen" ? "錄製中・開盤後續錄" : "錄製中・盤前"
+          : "未錄製";
         elements.recordingDot.className = `recording-dot${recording ? " active" : ""}`;
         elements.recordPath.textContent = recordPath;
         elements.recordPath.title = recordPath === "—" ? "" : recordPath;
@@ -2492,8 +2540,20 @@
         } else {
           elements.lastEventAge.classList.add("fresh");
         }
-        updateHealthBadge(elements.loginStatus, "登入", state.login_ok);
-        updateHealthBadge(elements.subscribeStatus, "訂閱", state.subscribe_ok);
+        updateHealthBadge(
+          elements.loginStatus,
+          "連線",
+          state.login_ok === true
+            ? (!freshnessRequired || streamFresh)
+            : state.login_ok
+        );
+        updateHealthBadge(
+          elements.subscribeStatus,
+          "訂閱",
+          state.subscribe_ok === true
+            ? (!freshnessRequired || streamFresh)
+            : state.subscribe_ok
+        );
       }
 
       function renderState(state) {
@@ -2515,21 +2575,28 @@
         setCount(elements.countHeld, counts.locked_held);
         setCount(elements.countTouched, counts.touched);
         setCount(elements.countWatching, counts.watching);
-        setCount(
-          elements.countAnomaly,
-          stocks.filter((stock) => (finiteNumber(stock.anomaly_score) ?? 0) >= 2).length
-        );
+        setCount(elements.countAnomaly, counts.anomaly);
         elements.stockSummary.textContent =
           `標的 ${numberFormatter.format(universe)} 檔・已訂閱 ${numberFormatter.format(subscribed)} 檔`;
-        if (service === "error") {
-          elements.connectionNote.textContent = "API 已連線・服務異常";
+        if (service === "replay") {
+          elements.connectionNote.textContent = "歷史回放・未連券商 API";
+          elements.connectionNote.className = "connection-note";
+        } else if (service === "error") {
+          elements.connectionNote.textContent = state.login_ok === false
+            ? "券商 API 未連線・服務異常"
+            : state.subscribe_ok === false
+              ? "券商 API 已登入・訂閱異常"
+              : "服務異常・連線狀態不可信";
           elements.connectionNote.className = "connection-note error";
         } else if (service === "degraded") {
-          elements.connectionNote.textContent = "API 已連線・資料停流";
+          elements.connectionNote.textContent = "券商 API 已登入・行情停流";
           elements.connectionNote.className = "connection-note warning";
-        } else {
-          elements.connectionNote.textContent = "API 已連線・每秒更新";
+        } else if (state.login_ok === true && state.subscribe_ok === true) {
+          elements.connectionNote.textContent = "券商 API 已連線・每秒更新";
           elements.connectionNote.className = "connection-note";
+        } else {
+          elements.connectionNote.textContent = "券商 API 尚未連線・本機 UI 正常";
+          elements.connectionNote.className = "connection-note offline";
         }
         renderFakeGradeStocks(
           stocks,

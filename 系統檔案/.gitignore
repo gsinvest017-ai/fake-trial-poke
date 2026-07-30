@@ -8,4 +8,5 @@ __pycache__/
 *.pyc
 data/*
 !data/INDEX.md
+!data/holidays.txt
 *.log

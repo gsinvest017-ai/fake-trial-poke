@@ -716,6 +716,16 @@ class ServiceRecordTests(unittest.TestCase):
                 mock.patch.object(service, "POSTOPEN_MINUTES", 0.003),
                 mock.patch.object(
                     service,
+                    "CAPACITY_EVENT_SETTLE_SECONDS",
+                    0,
+                ),
+                mock.patch.object(
+                    service,
+                    "MIN_SIMTRADE_BIDASK_EVENTS_FOR_SESSION",
+                    1,
+                ),
+                mock.patch.object(
+                    service,
                     "SNAPSHOT_AFTER_END_SECONDS",
                     0.01,
                 ),
@@ -861,6 +871,11 @@ class ServiceRecordTests(unittest.TestCase):
             mock.patch.object(
                 service,
                 "SNAPSHOT_AFTER_END_SECONDS",
+                0,
+            ),
+            mock.patch.object(
+                service,
+                "CAPACITY_EVENT_SETTLE_SECONDS",
                 0,
             ),
             mock.patch.object(

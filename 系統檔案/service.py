@@ -32,6 +32,7 @@ from typing import Any, Callable, Iterable
 from zoneinfo import ZoneInfo
 
 import control_state
+import jsonl_quality
 
 try:
     import msvcrt
@@ -51,6 +52,7 @@ os.environ["LOG_SENTRY"] = ""
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
 HISTORY_DIR = DATA_DIR / "history"
+HOLIDAYS_PATH = DATA_DIR / "holidays.txt"
 TAIPEI = ZoneInfo("Asia/Taipei")
 DEFAULT_HOST = "127.0.0.1"
 MAX_SUBSCRIBED_STOCKS = 254
@@ -59,6 +61,7 @@ SNAPSHOT_AFTER_END_SECONDS = 5
 POSTOPEN_MINUTES = 5
 PUBLISH_INTERVAL_SECONDS = 0.2
 SUBSCRIBE_EVENT_GRACE_SECONDS = 0.01
+CAPACITY_EVENT_SETTLE_SECONDS = 1.5
 LOGIN_RETRY_SECONDS = 30.0
 LOGIN_RETRY_MAX_SECONDS = 300.0
 LOGIN_MAX_CONSECUTIVE_FAILURES = 5
@@ -71,6 +74,7 @@ SOURCE_HEARTBEAT_STALE_SECONDS = 5.0
 DEFAULT_STALE_AFTER_SECONDS = 10.0
 TELEGRAM_NOTIFY_DEADLINE_SECONDS = 60.0
 TODAY_RECORDING_SUCCESS_THRESHOLD = 100
+MIN_SIMTRADE_BIDASK_EVENTS_FOR_SESSION = 5
 HISTORY_RETENTION_DAYS = 3
 
 
@@ -403,6 +407,37 @@ def landed_event_count(path: Path) -> int:
     )
 
 
+@lru_cache(maxsize=64)
+def _landed_session_state(
+    path_text: str,
+    file_size: int,
+    modified_ns: int,
+) -> str | None:
+    del file_size, modified_ns
+    try:
+        payload = json.loads(
+            Path(path_text).read_text(encoding="utf-8-sig")
+        )
+    except (OSError, ValueError, TypeError):
+        return None
+    if isinstance(payload, dict) and payload.get("session_state") == "no_session":
+        return "no_session"
+    return None
+
+
+def landed_session_state(record_path: Path) -> str | None:
+    meta_path = record_path.with_suffix(".meta.json")
+    try:
+        stat = meta_path.stat()
+    except OSError:
+        return None
+    return _landed_session_state(
+        str(meta_path.resolve()),
+        stat.st_size,
+        stat.st_mtime_ns,
+    )
+
+
 def window_clock(
     value: Any,
     fallback: datetime_time,
@@ -432,7 +467,7 @@ def classify_today_recording_state(
         current = now.replace(tzinfo=TAIPEI)
     else:
         current = now.astimezone(TAIPEI)
-    if current.weekday() >= 5:
+    if not is_trading_day(current.date()):
         return "waiting"
 
     start_at, end_at = window_on(
@@ -469,6 +504,7 @@ def build_today_recording(
     recording: bool,
     active_record_path: Path | None = None,
     active_record_count: int | None = None,
+    session_state: str | None = None,
 ) -> dict[str, Any]:
     """建立可由落地檔案重建、不依賴程序存活期的今日錄製摘要。"""
     if now.tzinfo is None:
@@ -502,21 +538,28 @@ def build_today_recording(
     if recording and active_record_count is not None and not has_data:
         record_count = max(record_count, safe_int(active_record_count))
 
+    if session_state is None:
+        session_state = landed_session_state(main_path)
+
+    classified_state = classify_today_recording_state(
+        now=current,
+        start_clock=start_clock,
+        end_clock=end_clock,
+        has_data=has_data,
+        record_count=record_count,
+        service_status=service_status,
+        recording=recording,
+    )
+    if session_state == "no_session":
+        classified_state = "no_session"
+
     return {
         "date": date_key,
         "window": f"{start_clock:%H:%M}–{end_clock:%H:%M}",
         "record_count": record_count,
         "has_data": has_data,
-        "state": classify_today_recording_state(
-            now=current,
-            start_clock=start_clock,
-            end_clock=end_clock,
-            has_data=has_data,
-            record_count=record_count,
-            service_status=service_status,
-            recording=recording,
-        ),
-        "is_trading_day": current.weekday() < 5,
+        "state": classified_state,
+        "is_trading_day": is_trading_day(current.date()),
     }
 
 
@@ -551,9 +594,68 @@ def window_on(
     return start_at, end_at
 
 
+@lru_cache(maxsize=16)
+def _load_market_holidays(
+    path_text: str,
+    file_size: int,
+    modified_ns: int,
+) -> frozenset[date]:
+    del file_size, modified_ns
+    source = Path(path_text)
+    try:
+        lines = source.read_text(encoding="utf-8-sig").splitlines()
+    except OSError as exc:
+        print(
+            f"休市日清單讀取 FAILED（{type(exc).__name__}）",
+            flush=True,
+        )
+        return frozenset()
+
+    holidays: set[date] = set()
+    for line_number, raw_line in enumerate(lines, start=1):
+        text = raw_line.strip()
+        if not text or text.startswith("#"):
+            continue
+        try:
+            holidays.add(date.fromisoformat(text))
+        except ValueError:
+            print(
+                f"休市日清單 WARNING：{source.name}:{line_number} 已略過",
+                flush=True,
+            )
+    return frozenset(holidays)
+
+
+def load_market_holidays(path: Path | None = None) -> set[date]:
+    """Load the locally maintained TWSE closed-day list by file fingerprint."""
+    source = path or HOLIDAYS_PATH
+    try:
+        stat = source.stat()
+    except FileNotFoundError:
+        return set()
+    except OSError as exc:
+        print(
+            f"休市日清單讀取 FAILED（{type(exc).__name__}）",
+            flush=True,
+        )
+        return set()
+    return set(
+        _load_market_holidays(
+            str(source.resolve()),
+            stat.st_size,
+            stat.st_mtime_ns,
+        )
+    )
+
+
+def is_trading_day(day: date, path: Path | None = None) -> bool:
+    return day.weekday() < 5 and day not in load_market_holidays(path)
+
+
 def next_weekday(day: date) -> date:
+    """Return the next scheduled trading day (legacy public name retained)."""
     candidate = day + timedelta(days=1)
-    while candidate.weekday() >= 5:
+    while not is_trading_day(candidate):
         candidate += timedelta(days=1)
     return candidate
 
@@ -563,6 +665,8 @@ def upcoming_window(
     start_clock: datetime_time,
     end_clock: datetime_time,
 ) -> tuple[datetime, datetime]:
+    if not is_trading_day(now.date()):
+        return window_on(next_weekday(now.date()), start_clock, end_clock)
     start_at, end_at = window_on(now.date(), start_clock, end_clock)
     if now < end_at + timedelta(seconds=SNAPSHOT_AFTER_END_SECONDS):
         return start_at, end_at
@@ -596,6 +700,8 @@ def empty_state(
     window_end: str,
     next_window_at: str | None,
     auto_record_enabled: bool = True,
+    control_error: bool = False,
+    control_error_reason: str | None = None,
 ) -> dict[str, Any]:
     today_recording = build_today_recording(
         now=taipei_now(),
@@ -612,8 +718,12 @@ def empty_state(
         "next_window_at": next_window_at,
         "universe": 0,
         "subscribed": 0,
+        "dropped": [],
         "auto_record_enabled": auto_record_enabled,
+        "control_error": bool(control_error),
+        "control_error_reason": control_error_reason,
         "recording": False,
+        "phase": None,
         "record_path": None,
         "record_count": 0,
         "today_recording": today_recording,
@@ -633,6 +743,7 @@ def empty_state(
             "locked_held": 0,
             "touched": 0,
             "watching": 0,
+            "no_data": 0,
             "anomaly": 0,
         },
         "stocks": [],
@@ -734,9 +845,13 @@ def write_record_metadata(
     """寫 recorder/scanner 共用的同名 .meta.json sidecar。"""
     meta_path = record_path.with_suffix(".meta.json")
     meta_path.parent.mkdir(parents=True, exist_ok=True)
-    with meta_path.open("w", encoding="utf-8", newline="\n") as handle:
+    temporary_path = meta_path.with_suffix(meta_path.suffix + ".tmp")
+    with temporary_path.open("w", encoding="utf-8", newline="\n") as handle:
         json.dump(metadata, handle, ensure_ascii=False, indent=2)
         handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    temporary_path.replace(meta_path)
     return meta_path
 
 
@@ -881,6 +996,53 @@ def start_telegram_result_notification(result_path: Path) -> None:
         )
 
 
+_CONTROL_ERROR_NOTIFICATION_LOCK = threading.Lock()
+_CONTROL_ERROR_NOTIFICATION_STARTED = False
+
+
+def start_control_error_notification(reason: str) -> bool:
+    """Start at most one control-file alert per service process."""
+    global _CONTROL_ERROR_NOTIFICATION_STARTED
+    with _CONTROL_ERROR_NOTIFICATION_LOCK:
+        if _CONTROL_ERROR_NOTIFICATION_STARTED:
+            return False
+        _CONTROL_ERROR_NOTIFICATION_STARTED = True
+
+    def notify() -> None:
+        try:
+            import telegram_notify
+
+            sent_count = telegram_notify.send_telegram_message(
+                "⚠️ 試撮錄製設定檔異常，已 fail-closed 停用自動錄製。"
+                f"\n原因：{reason}",
+                deadline=time.monotonic()
+                + TELEGRAM_NOTIFY_DEADLINE_SECONDS,
+            )
+            if sent_count is None:
+                print("TEL 憑證未設定，略過控制檔異常通知", flush=True)
+            else:
+                print("TEL 控制檔異常通知成功", flush=True)
+        except Exception as exc:
+            print(
+                f"TEL 控制檔異常通知失敗：{type(exc).__name__}",
+                flush=True,
+            )
+
+    try:
+        thread = threading.Thread(
+            target=notify,
+            name="telegram-control-error-notify",
+            daemon=True,
+        )
+        thread.start()
+    except Exception as exc:
+        print(
+            f"TEL 控制檔異常通知失敗：{type(exc).__name__}",
+            flush=True,
+        )
+    return True
+
+
 class SharedState:
     """提供 webserver 無鎖外洩風險的 thread-safe JSON snapshot。"""
 
@@ -916,6 +1078,8 @@ class ServiceRuntime:
         record_path: Path | None = None,
         record_append: bool = False,
         auto_record_enabled: bool = True,
+        control_error: bool = False,
+        control_error_reason: str | None = None,
     ) -> None:
         from detector import AuctionDetector
 
@@ -931,9 +1095,17 @@ class ServiceRuntime:
         self._now_override: str | None = None
         self._universe = 0
         self._subscribed = 0
+        self._dropped: list[str] = []
         self._login_ok = False
         self._subscribe_ok = False
         self._auto_record_enabled = bool(auto_record_enabled)
+        self._control_error = bool(control_error)
+        self._control_error_reason = (
+            str(control_error_reason)
+            if control_error and control_error_reason
+            else None
+        )
+        self._today_recording_state: str | None = None
         self._last_event_ts: datetime | None = None
         self._stale_after_seconds = stale_after_seconds
         self._source_thread: threading.Thread | None = None
@@ -951,6 +1123,7 @@ class ServiceRuntime:
         self._record_base_count = 0
         self._aux_record_writer: ServiceJsonlWriter | None = None
         self._aux_record_path: Path | None = None
+        self._aux_record_base_count = 0
         self._record_error: BaseException | None = None
         self.shared = SharedState(
             empty_state(
@@ -960,6 +1133,8 @@ class ServiceRuntime:
                 window_end=window_end,
                 next_window_at=None,
                 auto_record_enabled=self._auto_record_enabled,
+                control_error=self._control_error,
+                control_error_reason=self._control_error_reason,
             )
         )
         if record_path is not None:
@@ -985,7 +1160,9 @@ class ServiceRuntime:
             self._detector = detector
             self._universe = universe
             self._subscribed = subscribed
+            self._dropped = []
             self._last_event_ts = None
+            self._today_recording_state = None
 
     def set_context(
         self,
@@ -995,11 +1172,13 @@ class ServiceRuntime:
         now_override: str | None | object = ...,
         universe: int | None = None,
         subscribed: int | None = None,
+        dropped: Iterable[str] | object = ...,
         login_ok: bool | None = None,
         subscribe_ok: bool | None = None,
         login_circuit_open: bool | None = None,
         login_failure_count: int | None = None,
         last_event_ts: datetime | str | None | object = ...,
+        today_recording_state: str | None | object = ...,
     ) -> None:
         with self._lock:
             if service_status is not None:
@@ -1012,6 +1191,13 @@ class ServiceRuntime:
                 self._universe = universe
             if subscribed is not None:
                 self._subscribed = subscribed
+            if dropped is not ...:
+                raw_dropped = [] if dropped is None else dropped
+                self._dropped = [
+                    str(code).strip()
+                    for code in raw_dropped  # type: ignore[union-attr]
+                    if str(code).strip()
+                ]
             if login_ok is not None:
                 self._login_ok = bool(login_ok)
             if subscribe_ok is not None:
@@ -1037,6 +1223,10 @@ class ServiceRuntime:
                     self._last_event_ts = parsed_last_event
                 else:
                     self._last_event_ts = parse_iso(last_event_ts)
+            if today_recording_state is not ...:
+                if today_recording_state not in {None, "no_session"}:
+                    raise ValueError("today_recording_state enum 不合法")
+                self._today_recording_state = today_recording_state
 
     def bind_source_thread(
         self,
@@ -1084,6 +1274,21 @@ class ServiceRuntime:
         with self._lock:
             self._auto_record_enabled = bool(enabled)
 
+    def set_control_error(
+        self,
+        error: bool,
+        reason: str | None = None,
+    ) -> None:
+        with self._lock:
+            self._control_error = bool(error)
+            self._control_error_reason = (
+                str(reason) if error and reason else None
+            )
+
+    def finalize_no_data(self) -> list[str]:
+        with self._lock:
+            return self._detector.finalize_no_data()
+
     def start_recording(
         self,
         path: Path,
@@ -1100,7 +1305,7 @@ class ServiceRuntime:
                 raise RuntimeError("已有進行中的 JSONL 錄製")
             self._record_writer = writer
             self._record_path = resolved_path
-            self._record_count = 0
+            self._record_count = base_count
             self._record_base_count = base_count
             self._record_error = None
 
@@ -1116,12 +1321,12 @@ class ServiceRuntime:
         writer.close()
         final_metadata: dict[str, Any] | None = None
         with self._lock:
-            self._record_count = writer.count
+            self._record_count = self._record_base_count + writer.count
             self._record_error = writer.error
             if metadata is not None:
                 final_metadata = copy.deepcopy(metadata)
                 final_metadata["generated_at"] = iso_taipei()
-                final_metadata["record_count"] = writer.count
+                final_metadata["record_count"] = self._record_count
         if final_metadata is not None:
             write_record_metadata(writer.path, final_metadata)
         return writer.count
@@ -1137,6 +1342,9 @@ class ServiceRuntime:
                 raise RuntimeError("已有開盤後 JSONL 錄製")
             self._aux_record_writer = writer
             self._aux_record_path = relative_path(path)
+            self._aux_record_base_count = landed_event_count(
+                self._aux_record_path
+            )
 
     def finish_aux_recording(self, writer: ServiceJsonlWriter) -> None:
         with self._lock:
@@ -1144,7 +1352,8 @@ class ServiceRuntime:
                 return
             self._aux_record_writer = None
             self._record_path = self._aux_record_path
-            self._record_count = writer.count
+            self._record_count += self._aux_record_base_count + writer.count
+            self._aux_record_base_count = 0
             if writer.error is not None:
                 self._record_error = writer.error
 
@@ -1273,6 +1482,21 @@ class ServiceRuntime:
             # error/degraded，不迫使判定模組認識傳輸層健康狀態。
             state["service_status"] = service_status
             writer = self._record_writer or self._aux_record_writer
+            if self._record_writer is not None:
+                public_record_count = (
+                    self._record_base_count + self._record_writer.count
+                )
+                phase = "preopen"
+            elif self._aux_record_writer is not None:
+                public_record_count = (
+                    self._record_count
+                    + self._aux_record_base_count
+                    + self._aux_record_writer.count
+                )
+                phase = "postopen"
+            else:
+                public_record_count = self._record_count
+                phase = None
             active_record_path = (
                 self._record_path
                 if self._record_writer is not None
@@ -1284,14 +1508,16 @@ class ServiceRuntime:
                 {
                     "recording": bool(writer is not None and writer.active),
                     "auto_record_enabled": self._auto_record_enabled,
+                    "control_error": self._control_error,
+                    "control_error_reason": self._control_error_reason,
+                    "phase": phase,
+                    "dropped": list(self._dropped),
                     "record_path": (
                         str(active_record_path)
                         if active_record_path is not None
                         else None
                     ),
-                    "record_count": (
-                        writer.count if writer is not None else self._record_count
-                    ),
+                    "record_count": public_record_count,
                     "last_event_age_sec": last_event_age_sec,
                     "login_ok": self._login_ok,
                     "subscribe_ok": self._subscribe_ok,
@@ -1312,7 +1538,7 @@ class ServiceRuntime:
             active_record_count = (
                 self._record_base_count + self._record_writer.count
                 if self._record_writer is not None
-                else self._aux_record_writer.count
+                else public_record_count
                 if self._aux_record_writer is not None
                 else None
             )
@@ -1324,6 +1550,7 @@ class ServiceRuntime:
                 recording=state["recording"],
                 active_record_path=active_record_path,
                 active_record_count=active_record_count,
+                session_state=self._today_recording_state,
             )
         self.shared.replace(state)
         return state
@@ -1486,6 +1713,7 @@ class RecordingControl:
         *,
         mode: str,
         auto_record_enabled: bool,
+        control_error: bool = False,
         session: str,
         start_clock: datetime_time,
         end_clock: datetime_time,
@@ -1501,6 +1729,7 @@ class RecordingControl:
         self._changed = threading.Event()
         self._shutdown = False
         self._auto_record_enabled = bool(auto_record_enabled)
+        self._control_error = bool(control_error)
         self._decision_day = taipei_now().date()
         self._day_enabled = self._auto_record_enabled
         self._manual_day: date | None = None
@@ -1520,6 +1749,8 @@ class RecordingControl:
 
     def should_run_live(self, target_day: date) -> bool:
         with self._lock:
+            if not is_trading_day(target_day):
+                return False
             today = taipei_now().date()
             self._refresh_current_day_locked(today)
             if self._manual_day == target_day:
@@ -1597,9 +1828,11 @@ class RecordingControl:
             self._auto_record_enabled = bool(
                 written["auto_record_enabled"]
             )
+            self._control_error = False
             # 今天的決策已在啟動/換日時快照；set_auto 是「明天起」。
             self._changed.set()
         self.runtime.set_auto_record_enabled(enabled)
+        self.runtime.set_control_error(False)
         return self.runtime.publish()
 
     def _stop(self) -> dict[str, Any]:
@@ -1641,6 +1874,12 @@ class RecordingControl:
                     status_code=503,
                     error_code="service_stopping",
                 )
+            if self._control_error:
+                raise ControlActionError(
+                    "設定檔異常，修復 control.json 後才能開始錄製",
+                    status_code=503,
+                    error_code="control_file_error",
+                )
             if self._active_stop is not None:
                 return self.runtime.publish()
             if self.mode == "replay":
@@ -1649,7 +1888,7 @@ class RecordingControl:
                 self.runtime.set_context(service_status="replay")
                 return self.runtime.publish()
 
-            if now.weekday() >= 5:
+            if not is_trading_day(now.date()):
                 raise ControlActionError("非交易日，無法開始今日錄製")
             start_at, end_at = window_on(
                 now.date(),
@@ -1721,30 +1960,42 @@ def load_replay(
     }
     rows: list[tuple[datetime, dict[str, Any]]] = []
     stream_codes: set[str] = set()
+    nonempty_lines = 0
+    bad_lines = 0
     with input_path.open("r", encoding="utf-8-sig") as handle:
         for line_number, raw_line in enumerate(handle, start=1):
             line = raw_line.strip()
             if not line:
                 continue
+            nonempty_lines += 1
             try:
                 event = json.loads(line)
-            except json.JSONDecodeError as exc:
-                raise ValueError(
-                    f"{input_path.name}:{line_number} 不是有效 JSON"
-                ) from exc
-            if not isinstance(event, dict):
-                raise ValueError(
-                    f"{input_path.name}:{line_number} 必須是 JSON object"
+            except json.JSONDecodeError:
+                bad_lines += 1
+                jsonl_quality.warn_bad_line(
+                    input_path,
+                    line_number,
+                    "不是有效 JSON",
                 )
+                continue
+            if not isinstance(event, dict):
+                bad_lines += 1
+                jsonl_quality.warn_bad_line(
+                    input_path,
+                    line_number,
+                    "不是 JSON object",
+                )
+                continue
             code = str(event.get("code") or "").strip()
             kind = str(event.get("kind") or "").strip()
             if not code or kind not in {"bidask", "tick", "snapshot"}:
+                bad_lines += 1
+                jsonl_quality.warn_bad_line(
+                    input_path,
+                    line_number,
+                    "缺少 code 或 kind 不合法",
+                )
                 continue
-            if kind != "snapshot":
-                stream_codes.add(code)
-            if subscribed_codes and code not in subscribed_codes:
-                continue
-
             event = dict(event)
             event["code"] = code
             source_time = parse_iso(event.get("ts"))
@@ -1756,11 +2007,24 @@ def load_replay(
             else:
                 event_time = source_time
             if event_time is None:
-                raise ValueError(
-                    f"{input_path.name}:{line_number} 缺少有效 ts"
+                bad_lines += 1
+                jsonl_quality.warn_bad_line(
+                    input_path,
+                    line_number,
+                    "缺少有效 ts",
                 )
+                continue
+            if subscribed_codes and code not in subscribed_codes:
+                continue
+            if kind != "snapshot":
+                stream_codes.add(code)
             rows.append((event_time, event))
 
+    jsonl_quality.enforce_quality(
+        input_path,
+        nonempty_lines=nonempty_lines,
+        bad_lines=bad_lines,
+    )
     if not subscribed_codes:
         subscribed_codes = stream_codes
         metadata = dict(metadata)
@@ -1841,6 +2105,7 @@ def replay_worker(
         if record_metadata is not None:
             runtime.finish_recording(record_metadata)
 
+    runtime.finalize_no_data()
     state = runtime.publish()
     if result_path is not None:
         write_detector_result(
@@ -1954,6 +2219,11 @@ def replay_control_worker(
                 login_ok=False,
                 subscribe_ok=False,
                 last_event_ts=None,
+                today_recording_state=(
+                    "no_session"
+                    if metadata.get("session_state") == "no_session"
+                    else None
+                ),
             )
             if record_out is not None:
                 runtime.start_recording(record_out)
@@ -1983,6 +2253,21 @@ class LiveSourceError(RuntimeError):
 
 class LiveLoginError(LiveSourceError):
     """憑證載入或券商登入失敗；受每日斷路器保護。"""
+
+
+def is_session_down_event(*values: Any) -> bool:
+    text = " ".join(str(value or "") for value in values).lower()
+    return any(
+        marker in text
+        for marker in (
+            "session down",
+            "session_down",
+            "disconnected",
+            "disconnect",
+            "logged out",
+            "logout",
+        )
+    )
 
 
 def _configure_quiet_solace() -> None:
@@ -2032,10 +2317,15 @@ def live_metadata(
     end_at: datetime,
     universe: list[tuple[str, Any]],
     subscribed_codes: Iterable[str],
+    dropped_codes: Iterable[str] = (),
+    sub_limit: int = MAX_SUBSCRIBED_STOCKS,
+    sub_limit_exact: bool = False,
+    capacity_basis: str = "尚未完成容量對帳",
 ) -> dict[str, Any]:
     import recorder
 
     codes = list(subscribed_codes)
+    dropped = list(dropped_codes)
     return {
         "date": start_at.strftime("%Y%m%d"),
         "session": session,
@@ -2048,9 +2338,12 @@ def live_metadata(
         "subscribed": len(codes),
         "channels": "bidask",
         "channels_per_stock": 1,
-        "sub_limit": MAX_SUBSCRIBED_STOCKS,
+        "sub_limit": max(0, int(sub_limit)),
         "sub_limit_unit": "streams",
-        "sub_limit_stocks": MAX_SUBSCRIBED_STOCKS,
+        "sub_limit_stocks": max(0, int(sub_limit)),
+        "sub_limit_exact": bool(sub_limit_exact),
+        "capacity_basis": capacity_basis,
+        "dropped": dropped,
         "subscribed_codes": codes,
         "stocks": [
             recorder.contract_meta(code, contract)
@@ -2084,7 +2377,16 @@ def run_one_live_window(
     active_subscriptions: list[tuple[Any, Any]] = []
     candidate_codes: set[str] = set()
     subscription_limit = threading.Event()
+    session_down = threading.Event()
+    closing_session = threading.Event()
     callbacks_ready = threading.Event()
+    subscriptions_reconciled = threading.Event()
+    callback_lock = threading.Lock()
+    first_failed_stream: list[int] = []
+    current_attempt = {"index": 0}
+    simtrade_bidask_count = 0
+    stream_event_codes: set[str] = set()
+    pending_bidasks: list[tuple[datetime, dict[str, Any]]] = []
     universe: list[tuple[str, Any]] = []
     names: dict[str, str] = {}
     recording_metadata: dict[str, Any] | None = None
@@ -2106,7 +2408,42 @@ def run_one_live_window(
         if recorder.is_subscription_limit_event(
             resp_code, event_code, info, event
         ):
+            with callback_lock:
+                if not first_failed_stream:
+                    first_failed_stream.append(
+                        max(1, current_attempt["index"])
+                    )
             subscription_limit.set()
+        if is_session_down_event(resp_code, event_code, info, event):
+            on_session_down()
+
+    def on_session_down() -> None:
+        if closing_session.is_set():
+            return
+        session_down.set()
+        callbacks_ready.clear()
+        runtime.set_context(login_ok=False, subscribe_ok=False)
+        runtime.publish()
+
+    def handle_bidask_record(
+        aware_event_at: datetime,
+        record: dict[str, Any],
+    ) -> None:
+        nonlocal simtrade_bidask_count
+        code = str(record.get("code") or "")
+        if code not in candidate_codes:
+            return
+        if start_at <= aware_event_at < end_at:
+            with callback_lock:
+                stream_event_codes.add(code)
+                if record.get("simtrade") is True:
+                    simtrade_bidask_count += 1
+            runtime.process_event(record)
+        elif (
+            end_at <= aware_event_at <= postopen_end_at
+            and postopen_writer is not None
+        ):
+            postopen_writer.put(record)
 
     def on_bidask(exchange: Any, bidask: Any) -> None:
         del exchange
@@ -2126,19 +2463,28 @@ def run_one_live_window(
                 return
             aware_event_at = event_at.replace(tzinfo=TAIPEI)
             record = recorder.bidask_record(bidask, code)
+            if not subscriptions_reconciled.is_set():
+                with callback_lock:
+                    pending_bidasks.append((aware_event_at, record))
+                return
             # detector 只吃盤前窗口；09:00–09:05 另檔保存，不倒灌判定。
-            if start_at <= aware_event_at < end_at:
-                runtime.process_event(record)
-            elif (
-                end_at <= aware_event_at <= postopen_end_at
-                and postopen_writer is not None
-            ):
-                postopen_writer.put(record)
+            handle_bidask_record(aware_event_at, record)
         except Exception as exc:  # pragma: no cover - 真實 callback 防禦
             print(
                 f"BidAsk callback FAILED（{recorder.safe_error(exc)}）",
                 flush=True,
             )
+
+    def wait_live(seconds: float) -> bool:
+        deadline = time.monotonic() + max(0.0, seconds)
+        while not stop_event.is_set():
+            if session_down.is_set():
+                raise LiveSourceError("行情 session 中斷")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            stop_event.wait(min(1.0, remaining))
+        return True
 
     try:
         try:
@@ -2178,17 +2524,34 @@ def run_one_live_window(
             print(f"找不到合約 {len(unresolved)} 檔", flush=True)
 
         candidates = universe[:MAX_SUBSCRIBED_STOCKS]
-        candidate_codes.update(code for code, _contract in candidates)
+        candidate_list = [code for code, _contract in candidates]
+        candidate_codes.update(candidate_list)
+        initial_dropped = [
+            code for code, _contract in universe[MAX_SUBSCRIBED_STOCKS:]
+        ]
+        initial_dropped.extend(
+            code for code in unresolved if code not in initial_dropped
+        )
         metadata = live_metadata(
             session=session,
             start_at=start_at,
             end_at=end_at,
             universe=universe,
-            subscribed_codes=candidate_codes,
+            subscribed_codes=candidate_list,
+            dropped_codes=initial_dropped,
         )
         if record_enabled:
             output_path = record_out or default_live_record_path(start_at)
             try:
+                early_metadata = dict(metadata)
+                early_metadata.update(
+                    {
+                        "generated_at": iso_taipei(),
+                        "record_count": landed_event_count(output_path),
+                        "metadata_phase": "window_start",
+                    }
+                )
+                write_record_metadata(output_path, early_metadata)
                 runtime.start_recording(output_path, append=True)
                 recording_metadata = metadata
                 if session == "preopen":
@@ -2206,7 +2569,7 @@ def run_one_live_window(
                         postopen_writer,
                         postopen_path,
                     )
-            except OSError as exc:
+            except Exception as exc:
                 raise LiveSourceError(
                     f"recording FAILED（{recorder.safe_error(exc)}）"
                 ) from exc
@@ -2216,8 +2579,26 @@ def run_one_live_window(
                     start_at=end_at,
                     end_at=postopen_end_at,
                     universe=universe,
-                    subscribed_codes=candidate_codes,
+                    subscribed_codes=candidate_list,
+                    dropped_codes=initial_dropped,
                 )
+                early_postopen_metadata = dict(postopen_metadata)
+                early_postopen_metadata.update(
+                    {
+                        "generated_at": iso_taipei(),
+                        "record_count": landed_event_count(postopen_path),
+                        "metadata_phase": "window_start",
+                    }
+                )
+                try:
+                    write_record_metadata(
+                        postopen_path,
+                        early_postopen_metadata,
+                    )
+                except Exception as exc:
+                    raise LiveSourceError(
+                        "postopen early meta 落地 FAILED"
+                    ) from exc
         runtime.reset_detector(
             metadata,
             session=session,
@@ -2234,14 +2615,30 @@ def run_one_live_window(
             now_override=None,
         )
         runtime.publish()
-        callbacks_ready.set()
 
         api.quote.set_event_callback(on_event)
+        set_session_down_callback = getattr(
+            api.quote,
+            "set_session_down_callback",
+            None,
+        )
+        if callable(set_session_down_callback):
+            set_session_down_callback(on_session_down)
         api.quote.set_on_bidask_stk_v1_callback(on_bidask)
-        successful_codes: list[str] = []
+        callbacks_ready.set()
+        fully_issued_codes: list[str] = []
+        capacity_basis = "未撞上限；本次為已發出訂閱數下界"
+        attempted_streams = 0
         for code, contract in candidates:
-            if stop_event.is_set() or subscription_limit.is_set():
+            if (
+                stop_event.is_set()
+                or subscription_limit.is_set()
+                or session_down.is_set()
+            ):
                 break
+            attempted_streams += 1
+            with callback_lock:
+                current_attempt["index"] = attempted_streams
             try:
                 with recorder.quiet_library_call():
                     api.quote.subscribe(
@@ -2251,16 +2648,66 @@ def run_one_live_window(
                         version=QuoteVersion.v1,
                     )
                 active_subscriptions.append((contract, QuoteType.BidAsk))
-                successful_codes.append(code)
+                fully_issued_codes.append(code)
             except Exception as exc:
+                with callback_lock:
+                    if not first_failed_stream:
+                        first_failed_stream.append(attempted_streams)
+                subscription_limit.set()
+                capacity_basis = (
+                    f"第 {attempted_streams} 條訂閱呼叫失敗"
+                    f"（{recorder.safe_error(exc)}）"
+                )
                 print(
                     "BidAsk 訂閱停止"
-                    f"（第 {len(successful_codes) + 1} 檔；"
+                    f"（第 {attempted_streams} 檔；"
                     f"{recorder.safe_error(exc)}）",
                     flush=True,
                 )
                 break
             stop_event.wait(SUBSCRIBE_EVENT_GRACE_SECONDS)
+
+        settle_deadline = time.monotonic() + CAPACITY_EVENT_SETTLE_SECONDS
+        while (
+            not stop_event.is_set()
+            and not subscription_limit.is_set()
+            and time.monotonic() < settle_deadline
+        ):
+            if session_down.is_set():
+                raise LiveSourceError("行情 session 中斷")
+            stop_event.wait(
+                max(
+                    0.0,
+                    min(0.05, settle_deadline - time.monotonic()),
+                )
+            )
+        if stop_event.is_set():
+            return False
+        if session_down.is_set():
+            raise LiveSourceError("行情 session 中斷")
+
+        with callback_lock:
+            failed_at = min(first_failed_stream) if first_failed_stream else None
+        if failed_at is not None:
+            capacity_streams = max(0, failed_at - 1)
+            successful_codes = fully_issued_codes[:capacity_streams]
+            capacity_exact = True
+            if capacity_basis.startswith("未撞上限"):
+                capacity_basis = (
+                    f"伺服器於第 {failed_at} 條串流回報配額事件"
+                )
+        else:
+            capacity_streams = len(fully_issued_codes)
+            successful_codes = list(fully_issued_codes)
+            capacity_exact = False
+
+        successful_set = set(successful_codes)
+        dropped_codes = [
+            code for code, _contract in universe if code not in successful_set
+        ]
+        dropped_codes.extend(
+            code for code in unresolved if code not in dropped_codes
+        )
 
         if not successful_codes:
             candidate_codes.clear()
@@ -2271,36 +2718,53 @@ def run_one_live_window(
                     end_at=end_at,
                     universe=universe,
                     subscribed_codes=[],
+                    dropped_codes=dropped_codes,
+                    sub_limit=capacity_streams,
+                    sub_limit_exact=capacity_exact,
+                    capacity_basis=capacity_basis,
                 )
-            runtime.set_context(subscribed=0, subscribe_ok=False)
+            runtime.set_context(
+                subscribed=0,
+                dropped=dropped_codes,
+                subscribe_ok=False,
+            )
             raise LiveSourceError("成功訂閱檔數為 0")
-        if len(successful_codes) != len(candidate_codes):
-            candidate_codes.intersection_update(successful_codes)
-            metadata = live_metadata(
-                session=session,
-                start_at=start_at,
-                end_at=end_at,
-                universe=universe,
-                subscribed_codes=successful_codes,
-            )
-            runtime.reset_detector(
-                metadata,
-                session=session,
-                window_start=start_at.isoformat(timespec="seconds"),
-                window_end=end_at.isoformat(timespec="seconds"),
-                universe=len(universe),
-                subscribed=len(successful_codes),
-            )
-        else:
-            metadata = live_metadata(
-                session=session,
-                start_at=start_at,
-                end_at=end_at,
-                universe=universe,
-                subscribed_codes=successful_codes,
-            )
+        candidate_codes.intersection_update(successful_codes)
+        metadata = live_metadata(
+            session=session,
+            start_at=start_at,
+            end_at=end_at,
+            universe=universe,
+            subscribed_codes=successful_codes,
+            dropped_codes=dropped_codes,
+            sub_limit=capacity_streams,
+            sub_limit_exact=capacity_exact,
+            capacity_basis=capacity_basis,
+        )
+        runtime.reset_detector(
+            metadata,
+            session=session,
+            window_start=start_at.isoformat(timespec="seconds"),
+            window_end=end_at.isoformat(timespec="seconds"),
+            universe=len(universe),
+            subscribed=len(successful_codes),
+        )
         if recording_metadata is not None:
             recording_metadata = metadata
+            reconciled_metadata = dict(recording_metadata)
+            reconciled_metadata.update(
+                {
+                    "generated_at": iso_taipei(),
+                    "record_count": landed_event_count(output_path),
+                    "metadata_phase": "capacity_reconciled",
+                }
+            )
+            try:
+                write_record_metadata(output_path, reconciled_metadata)
+            except Exception as exc:
+                raise LiveSourceError(
+                    "容量對帳 meta 落地 FAILED"
+                ) from exc
         if postopen_metadata is not None:
             postopen_metadata = live_metadata(
                 session=session,
@@ -2308,17 +2772,43 @@ def run_one_live_window(
                 end_at=postopen_end_at,
                 universe=universe,
                 subscribed_codes=successful_codes,
+                dropped_codes=dropped_codes,
+                sub_limit=capacity_streams,
+                sub_limit_exact=capacity_exact,
+                capacity_basis=capacity_basis,
             )
+            reconciled_postopen_metadata = dict(postopen_metadata)
+            reconciled_postopen_metadata.update(
+                {
+                    "generated_at": iso_taipei(),
+                    "record_count": landed_event_count(postopen_path),
+                    "metadata_phase": "capacity_reconciled",
+                }
+            )
+            try:
+                write_record_metadata(
+                    postopen_path,
+                    reconciled_postopen_metadata,
+                )
+            except Exception as exc:
+                raise LiveSourceError(
+                    "postopen 容量對帳 meta 落地 FAILED"
+                ) from exc
         runtime.set_context(
             subscribed=len(successful_codes),
-            subscribe_ok=(
-                len(successful_codes) == len(candidates)
-                and len(candidates) > 0
-            ),
+            dropped=dropped_codes,
+            subscribe_ok=True,
         )
+        subscriptions_reconciled.set()
+        with callback_lock:
+            buffered_bidasks = list(pending_bidasks)
+            pending_bidasks.clear()
+        for buffered_at, buffered_record in buffered_bidasks:
+            handle_bidask_record(buffered_at, buffered_record)
         print(
             f"標的宇宙={len(universe)}；BidAsk 單通道訂閱="
-            f"{len(successful_codes)} 檔",
+            f"{len(successful_codes)} 檔；dropped={len(dropped_codes)} 檔；"
+            f"容量={'精確' if capacity_exact else '下界'}={capacity_streams}",
             flush=True,
         )
 
@@ -2328,25 +2818,21 @@ def run_one_live_window(
                 service_status="armed",
                 next_window_at=iso_taipei(start_at),
             )
-            if stop_wait(stop_event, remaining):
+            if wait_live(remaining):
                 return False
         if taipei_now() < end_at:
             runtime.set_context(
                 service_status="live",
                 next_window_at=None,
             )
-            if stop_wait(
-                stop_event,
-                (end_at - taipei_now()).total_seconds(),
-            ):
+            if wait_live((end_at - taipei_now()).total_seconds()):
                 return False
 
         snapshot_at = end_at + timedelta(
             seconds=SNAPSHOT_AFTER_END_SECONDS
         )
-        if stop_wait(
-            stop_event,
-            max(0.0, (snapshot_at - taipei_now()).total_seconds()),
+        if wait_live(
+            max(0.0, (snapshot_at - taipei_now()).total_seconds())
         ):
             return False
         observed_at = taipei_now().replace(tzinfo=None)
@@ -2386,9 +2872,19 @@ def run_one_live_window(
             start_at.timetz().replace(tzinfo=None),
             end_at.timetz().replace(tzinfo=None),
         )
+        with callback_lock:
+            final_simtrade_bidask_count = simtrade_bidask_count
+            final_stream_event_codes = sorted(stream_event_codes)
+        no_session = (
+            session == "preopen"
+            and final_simtrade_bidask_count
+            < MIN_SIMTRADE_BIDASK_EVENTS_FOR_SESSION
+        )
+        no_data_codes = runtime.finalize_no_data()
         runtime.set_context(
             service_status="closed",
             next_window_at=iso_taipei(next_start),
+            today_recording_state=("no_session" if no_session else None),
         )
         state = runtime.publish()
         if recording_metadata is not None:
@@ -2398,11 +2894,19 @@ def run_one_live_window(
                     "snapshot_count": snapshot_count,
                     "snapshot_requested": len(universe),
                     "snapshot_complete": snapshot_count == len(universe),
+                    "simtrade_bidask_count": final_simtrade_bidask_count,
+                    "stream_event_codes": final_stream_event_codes,
+                    "no_data_codes": no_data_codes,
+                    "session_state": (
+                        "no_session" if no_session else "completed"
+                    ),
+                    "metadata_phase": "final",
                 }
             )
             try:
                 runtime.finish_recording(final_metadata)
                 recording_metadata = None
+                state = runtime.publish()
                 result_path = (
                     result_out
                     if result_out is not None
@@ -2418,8 +2922,13 @@ def run_one_live_window(
                     "盤前 meta/result 落地 FAILED"
                 ) from exc
             print(f"detector result={written_result}", flush=True)
-            if session == "preopen" and notification_owner:
+            if session == "preopen" and notification_owner and not no_session:
                 start_telegram_result_notification(written_result)
+            elif session == "preopen" and notification_owner and no_session:
+                print(
+                    "非交易日/無盤前 session：略過 Telegram 判定通知",
+                    flush=True,
+                )
         print(
             f"窗口收口：snapshot={snapshot_count}/{len(universe)}；"
             "counts="
@@ -2435,8 +2944,7 @@ def run_one_live_window(
             postopen_snapshot_at = postopen_end_at + timedelta(
                 seconds=SNAPSHOT_AFTER_END_SECONDS
             )
-            if stop_wait(
-                stop_event,
+            if wait_live(
                 max(
                     0.0,
                     (postopen_snapshot_at - taipei_now()).total_seconds(),
@@ -2486,7 +2994,7 @@ def run_one_live_window(
                             postopen_snapshot_count == len(universe)
                         ),
                         "generated_at": iso_taipei(),
-                        "record_count": postopen_writer.count,
+                        "record_count": landed_event_count(postopen_path),
                     }
                 )
                 try:
@@ -2511,7 +3019,9 @@ def run_one_live_window(
             postopen_metadata = None
         return True
     finally:
+        closing_session.set()
         callbacks_ready.clear()
+        runtime.set_context(login_ok=False, subscribe_ok=False)
         if recording_metadata is not None:
             final_metadata = dict(recording_metadata)
             final_metadata.update(
@@ -2544,7 +3054,7 @@ def run_one_live_window(
                             postopen_snapshot_count == len(universe)
                         ),
                         "generated_at": iso_taipei(),
-                        "record_count": postopen_writer.count,
+                        "record_count": landed_event_count(postopen_path),
                     }
                 )
                 try:
@@ -2942,12 +3452,17 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     stop_event = threading.Event()
     install_stop_handlers(stop_event)
+    control_error = False
+    control_error_reason: str | None = None
     try:
         auto_record_enabled = control_state.get_auto_record_enabled()
     except control_state.ControlStateError as exc:
         # 控制檔異常時 fail closed，避免未經允許連線訂閱。
         auto_record_enabled = False
+        control_error = True
+        control_error_reason = str(exc)
         print(f"錄製控制狀態 FAILED（{type(exc).__name__}）", flush=True)
+        start_control_error_notification(control_error_reason)
     record_out = (
         relative_path(args.record_out) if args.record_out else None
     )
@@ -2981,6 +3496,8 @@ def main(argv: list[str] | None = None) -> int:
             service_status="replay",
             stale_after_seconds=args.stale_after_sec,
             auto_record_enabled=auto_record_enabled,
+            control_error=control_error,
+            control_error_reason=control_error_reason,
         )
         runtime.reset_detector(
             metadata,
@@ -2994,12 +3511,18 @@ def main(argv: list[str] | None = None) -> int:
             service_status="replay",
             next_window_at=None,
             now_override=iso_taipei(rows[0][0]) if rows else None,
+            today_recording_state=(
+                "no_session"
+                if metadata.get("session_state") == "no_session"
+                else None
+            ),
         )
         replay_start_clock, replay_end_clock = default_clock(session)
         control = RecordingControl(
             runtime,
             mode="replay",
             auto_record_enabled=auto_record_enabled,
+            control_error=control_error,
             session=session,
             start_clock=replay_start_clock,
             end_clock=replay_end_clock,
@@ -3054,12 +3577,15 @@ def main(argv: list[str] | None = None) -> int:
             service_status="idle",
             stale_after_seconds=args.stale_after_sec,
             auto_record_enabled=auto_record_enabled,
+            control_error=control_error,
+            control_error_reason=control_error_reason,
         )
         runtime.set_context(next_window_at=iso_taipei(start_at))
         control = RecordingControl(
             runtime,
             mode="live",
             auto_record_enabled=auto_record_enabled,
+            control_error=control_error,
             session=args.session,
             start_clock=start_clock,
             end_clock=end_clock,
