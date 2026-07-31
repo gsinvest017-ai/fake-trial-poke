@@ -123,6 +123,54 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _ui_shell_html() -> str:
+    """The application's own markup, for the lock screen to sit in front of.
+
+    Read straight off disk rather than fetched from the service, because the
+    service is precisely what must not be running: the shell is there so the
+    customer recognises their application, not so it works.
+    """
+    try:
+        return webserver.INDEX_PATH.read_text(encoding="utf-8")
+    except OSError:
+        LOG.warning("could not read the UI shell for the lock screen")
+        return ""
+
+
+def _refuse_if_unlicensed() -> None:
+    """Stop here unless the licence allows the application to run.
+
+    The refusal is shown *inside a window that looks like this application*,
+    with the real UI inert behind it, instead of a small dialog on an empty
+    desktop -- a bare dialog reads as a launcher that crashed rather than as a
+    licence that lapsed.
+
+    Nothing below this point runs: no port, no Shioaji login, no background
+    scan. That ordering is the whole guarantee. Starting the service first and
+    covering it with a window would leave the real thing running behind
+    something anyone can close.
+    """
+    # check() already folds in soft mode -- it returns allowed=True whenever
+    # should_enforce() is false -- so a source checkout still runs freely.
+    state = licensing.check()
+    if state.allowed:
+        return
+
+    LOG.error("licence refused: %s (%s)", state.message, state.status)
+    if licensing.refuse_in_window(
+            state,
+            title=WINDOW_TITLE,
+            width=1440,
+            height=900,
+            background="#07060a",
+            behind_html=_ui_shell_html()):
+        raise SystemExit(2)
+
+    # No pywebview, or the window could not open: fall back to the tkinter
+    # window / MessageBox, which exits on its own.
+    licensing.exit_with_message(state)
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     logging.basicConfig(
@@ -156,7 +204,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0
 
-    licensing.enforce_or_exit()
+    _refuse_if_unlicensed()
 
     port = _find_free_port(args.port)
     threading.Thread(

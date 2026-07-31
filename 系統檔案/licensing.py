@@ -134,6 +134,14 @@ except ImportError:
             return 0 if ok else 1
 
         @staticmethod
+        def refuse_in_window(state, **kwargs) -> bool:
+            return False
+
+        @staticmethod
+        def exit_with_message(state, code: int = 2) -> None:
+            raise SystemExit(code)
+
+        @staticmethod
         def machine_id() -> str:
             return ""
 
@@ -162,6 +170,11 @@ enforce_or_exit = GATE.enforce_or_exit
 # GUI-subsystem, so `print()` resolves file=None to a None sys.stdout and
 # returns silently -- a failed --activate looked exactly like a successful one.
 report_cli = GATE.report_cli
+# Refuse inside a window that looks like this application rather than a bare
+# dialog with nothing behind it -- the latter reads as a launcher that broke.
+refuse_in_window = GATE.refuse_in_window
+exit_with_message = GATE.exit_with_message
+check_state = GATE.check
 
 try:
     from keyguard.appgate import attach_parent_console
