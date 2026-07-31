@@ -3,7 +3,7 @@
 # Release: C:\Users\User\gs-app-pack\pack.ps1 -Tag v0.1.0 -Clean
 
 $AppName      = "Fake Trial Poke"
-$AppVersion   = "0.1.0"
+$AppVersion   = "0.1.1"
 $AppId        = "64B1E22E-7CEC-4892-B65D-79C6D750DD16"
 $AppExe       = "fake-trial-poke"
 $AppPublisher = "gsinvest"
