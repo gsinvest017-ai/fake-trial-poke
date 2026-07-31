@@ -24,7 +24,7 @@ Windows 假試撮盤前監控工具。原始碼與操作說明位於
 打不開」一模一樣。
 
 ```powershell
-python C:\Users\User\KEYGUARD\scripts\demo_expired_refusal.py `
+keyguard verify-refusal `
   --exe "$env:LOCALAPPDATA\Fake Trial Poke\fake-trial-poke.exe" `
   --app FAKE_TRIAL_POKE --app-name fake-trial-poke `
   --email-env FAKE_TRIAL_POKE_LICENCE_EMAIL --shot refusal.png
