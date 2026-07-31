@@ -129,6 +129,11 @@ except ImportError:
             return False, "keyguard is not installed in this build"
 
         @staticmethod
+        def report_cli(ok: bool, message: str, *, title: str = "") -> int:
+            print(f"{'OK' if ok else 'FAILED'}: {message}")
+            return 0 if ok else 1
+
+        @staticmethod
         def machine_id() -> str:
             return ""
 
@@ -153,6 +158,18 @@ licensee_email = GATE.licensee_email
 set_licensee_email = GATE.set_licensee_email
 should_enforce = GATE.should_enforce
 enforce_or_exit = GATE.enforce_or_exit
+# Reports one-shot commands where they can actually be seen. This build is
+# GUI-subsystem, so `print()` resolves file=None to a None sys.stdout and
+# returns silently -- a failed --activate looked exactly like a successful one.
+report_cli = GATE.report_cli
+
+try:
+    from keyguard.appgate import attach_parent_console
+except Exception:                                             # noqa: BLE001
+    def attach_parent_console() -> bool:                      # type: ignore[misc]
+        """Fallback for a build without keyguard: report whatever stdout is."""
+        import sys as _sys
+        return getattr(_sys, "stdout", None) is not None
 
 # Compatibility helpers used by existing integrations and their tests.
 _user_data_dir = GATE.state_dir

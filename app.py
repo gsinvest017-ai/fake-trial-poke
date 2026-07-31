@@ -132,7 +132,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     _configure_runtime_paths()
 
+    # Every branch below is a one-shot command whose whole output is its answer,
+    # and this is a windowed build: nothing printed reaches the operator until a
+    # console is attached. `report_cli` does that, and falls back to a dialog.
     if args.machine_id:
+        licensing.attach_parent_console()
         print(licensing.machine_id())
         return 0
     if args.activate:
@@ -140,9 +144,9 @@ def main(argv: list[str] | None = None) -> int:
             args.activate,
             args.licence_email or "",
         )
-        print(f"{'OK' if ok else 'FAILED'}: {message}")
-        return 0 if ok else 1
+        return licensing.report_cli(ok, message)
     if args.licence_status:
+        licensing.attach_parent_console()
         print(
             json.dumps(
                 licensing.check().to_dict(),
