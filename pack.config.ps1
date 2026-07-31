@@ -43,7 +43,14 @@ $PyiExtraArgs = @(
     "--paths=系統檔案",
     "--collect-all=shioaji",
     "--collect-all=pysolace",
-    "--collect-all=tzdata"
+    "--collect-all=tzdata",
+
+    # tkinter is stdlib, but PyInstaller only bundles it when something imports
+    # it at module scope -- and keyguard's licence gate imports it lazily, so it
+    # would silently fall back to a bare MessageBox. Collecting it explicitly is
+    # what makes the refusal a proper window the customer can copy from.
+    # Verify with `keyguard.appgate.AppGate.refusal_ui()` == "window".
+    "--collect-all=tkinter"
 )
 
 $PythonExe = "C:\Users\User\fake-trial-poke\系統檔案\.venv\Scripts\python.exe"
