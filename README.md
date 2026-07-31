@@ -13,9 +13,25 @@ Windows 假試撮盤前監控工具。原始碼與操作說明位於
 - licence 的 email、plan、席次與 expiration 都在 Ed25519 簽章載荷內；
   手改本機狀態檔不能延長期限。
 - 未啟用時只有 Keyguard 的 14 天有界 trial；trial 或正式 licence 到期後，
-  release 會拒絕啟動。
+  release 會拒絕啟動，並跳出一個說明狀態、machine id 與啟用指令的視窗。
 - 打包流程必須通過 `keyguard.packagecheck` 與 HTTP 啟動 smoke test，
-  否則不得產生 release。
+  否則不得產生 release。閘門包含 `--require-console-output`（啟用失敗在真實
+  終端機看得見）與 `--require-window`（過期會跳視窗，不是裸 MessageBox）。
+
+### 驗證「憑證失效會被擋住」
+
+不要用手動開一次來確認——少了 tkinter 時，那個失敗看起來跟「應用程式就是
+打不開」一模一樣。
+
+```powershell
+python C:\Users\User\KEYGUARD\scripts\demo_expired_refusal.py `
+  --exe "$env:LOCALAPPDATA\Fake Trial Poke\fake-trial-poke.exe" `
+  --app FAKE_TRIAL_POKE --app-name fake-trial-poke `
+  --email-env FAKE_TRIAL_POKE_LICENCE_EMAIL --shot refusal.png
+```
+
+它會在一個暫時的 `APPDATA` 裡把授權池推過到期日（**不動你真正的啟用狀態**），
+啟動已安裝的 exe，抓到拒絕視窗、截圖，並確認關掉視窗後行程以非零退出。
 
 ### 客戶啟用
 
