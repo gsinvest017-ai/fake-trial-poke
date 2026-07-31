@@ -61,7 +61,7 @@ $env:PATH = "$(Split-Path -Parent $PythonExe);$env:PATH"
 $RequireNonEditable = @("keyguard")
 
 $PostBuildCheck = @'
-{python} -m keyguard.packagecheck '{dist}' --email-env FAKE_TRIAL_POKE_LICENCE_EMAIL --require-console-output
+{python} -m keyguard.packagecheck '{dist}' --email-env FAKE_TRIAL_POKE_LICENCE_EMAIL --require-console-output --require-window
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 {python} 'C:\Users\User\gs-app-pack\scripts\smoke_launch.py' '{dist}' --timeout 90
 '@
