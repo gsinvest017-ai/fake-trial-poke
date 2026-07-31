@@ -83,11 +83,36 @@ except ImportError:
 
         @classmethod
         def licensee_email(cls) -> str:
-            return os.environ.get(EMAIL_ENV, "").strip()
+            # Env var first, then licence.json -- the same order AppGate uses.
+            # Reading only the env var made a configured address invisible here,
+            # so the same command printed different licensees depending on
+            # whether keyguard happened to be installed.
+            env = os.environ.get(EMAIL_ENV, "").strip()
+            if env:
+                return env
+            try:
+                import json
+                data = json.loads(cls.config_path().read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                return ""
+            return str(data.get("email", "")).strip()
 
-        @staticmethod
-        def set_licensee_email(email: str) -> None:
-            os.environ[EMAIL_ENV] = email.strip()
+        @classmethod
+        def set_licensee_email(cls, email: str) -> None:
+            # Persist to disk like AppGate does. Setting os.environ only looked
+            # like it worked and was gone at process exit, so `--licence-email`
+            # silently did nothing.
+            import json
+            path = cls.config_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            payload: dict = {}
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                pass
+            payload["email"] = email.strip()
+            path.write_text(json.dumps(payload, indent=2, ensure_ascii=False),
+                            encoding="utf-8")
 
         @classmethod
         def check(cls) -> LicenceState:
