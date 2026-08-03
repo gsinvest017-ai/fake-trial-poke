@@ -154,7 +154,7 @@ def _refuse_if_unlicensed() -> None:
     # refusing somebody for a licence that exists -- and then telling them to
     # run a command to install the thing they were sent -- is the whole reason
     # this step exists. Only ever extends, and a failure here changes nothing.
-    note = licensing.refresh_licence()
+    note = licensing.refresh_licence(url=licensing.STATUS_URL)
     if note:
         LOG.warning("%s", note)
 

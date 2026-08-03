@@ -184,6 +184,15 @@ refuse_in_window = GATE.refuse_in_window
 # Looks for a licence the vendor has already renewed, so a customer whose
 # renewal is sitting in their inbox folder is not refused for a licence that
 # exists. Can only ever extend -- see AppGate.refresh_licence.
+#: Where this build looks for the supplier's current word on a licence.
+#: Baked in rather than configured on the customer's machine -- a URL somebody
+#: can point elsewhere is a URL that can be pointed at nothing. The environment
+#: variable stays for testing and for customers behind a mirror.
+STATUS_URL = os.environ.get(
+    "FAKE_TRIAL_POKE_LICENCE_URL",
+    "",  # set to https://your.host/{app}/{email_sha256}.txt when published
+).strip()
+
 refresh_licence = GATE.refresh_licence
 licence_inboxes = GATE.licence_inboxes
 exit_with_message = GATE.exit_with_message
