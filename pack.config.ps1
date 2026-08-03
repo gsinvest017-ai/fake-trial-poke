@@ -3,7 +3,7 @@
 # Release: C:\Users\User\gs-app-pack\pack.ps1 -Tag v0.1.0 -Clean
 
 $AppName      = "Fake Trial Poke"
-$AppVersion   = "0.1.2"
+$AppVersion   = "0.1.3"
 $AppId        = "64B1E22E-7CEC-4892-B65D-79C6D750DD16"
 $AppExe       = "fake-trial-poke"
 $AppPublisher = "gsinvest"
@@ -68,7 +68,7 @@ if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 # The refusal now appears inside the app's own window, so the title to wait
 # for is the app's own. --forbid-port is the part that matters: a lock screen
 # over a running service would be decoration, not a gate.
-{python} -m keyguard.refusalcheck --exe '{dist}' --app FAKE_TRIAL_POKE --app-name fake-trial-poke --email-env FAKE_TRIAL_POKE_LICENCE_EMAIL --window-title '假試撮盤前監控' --window-timeout 45 --forbid-port 8900
+{python} -m keyguard.refusalcheck --exe '{dist}' --app FAKE_TRIAL_POKE --app-name fake-trial-poke --email-env FAKE_TRIAL_POKE_LICENCE_EMAIL --window-title '假試撮盤前監控' --window-timeout 45 --forbid-port 8900 --check-recovery
 '@
 
 $InstallerRequiresGh = $false

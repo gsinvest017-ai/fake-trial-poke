@@ -150,6 +150,14 @@ def _refuse_if_unlicensed() -> None:
     covering it with a window would leave the real thing running behind
     something anyone can close.
     """
+    # Before deciding, not after: the vendor may have renewed already, and
+    # refusing somebody for a licence that exists -- and then telling them to
+    # run a command to install the thing they were sent -- is the whole reason
+    # this step exists. Only ever extends, and a failure here changes nothing.
+    note = licensing.refresh_licence()
+    if note:
+        LOG.warning("%s", note)
+
     # check() already folds in soft mode -- it returns allowed=True whenever
     # should_enforce() is false -- so a source checkout still runs freely.
     state = licensing.check()
@@ -157,6 +165,9 @@ def _refuse_if_unlicensed() -> None:
         return
 
     LOG.error("licence refused: %s (%s)", state.message, state.status)
+    for folder in licensing.licence_inboxes():
+        LOG.error("a renewal saved into %s is picked up on the next launch",
+                  folder)
     if licensing.refuse_in_window(
             state,
             title=WINDOW_TITLE,

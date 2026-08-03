@@ -138,6 +138,14 @@ except ImportError:
             return False
 
         @staticmethod
+        def refresh_licence(**kwargs) -> str:
+            return ""
+
+        @classmethod
+        def licence_inboxes(cls) -> list:
+            return [cls.state_dir() / "licences"]
+
+        @staticmethod
         def exit_with_message(state, code: int = 2) -> None:
             raise SystemExit(code)
 
@@ -173,6 +181,11 @@ report_cli = GATE.report_cli
 # Refuse inside a window that looks like this application rather than a bare
 # dialog with nothing behind it -- the latter reads as a launcher that broke.
 refuse_in_window = GATE.refuse_in_window
+# Looks for a licence the vendor has already renewed, so a customer whose
+# renewal is sitting in their inbox folder is not refused for a licence that
+# exists. Can only ever extend -- see AppGate.refresh_licence.
+refresh_licence = GATE.refresh_licence
+licence_inboxes = GATE.licence_inboxes
 exit_with_message = GATE.exit_with_message
 check_state = GATE.check
 
