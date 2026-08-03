@@ -190,7 +190,8 @@ refuse_in_window = GATE.refuse_in_window
 #: variable stays for testing and for customers behind a mirror.
 STATUS_URL = os.environ.get(
     "FAKE_TRIAL_POKE_LICENCE_URL",
-    "",  # set to https://your.host/{app}/{email_sha256}.txt when published
+    "https://raw.githubusercontent.com/gsinvest017-ai/fake-trial-poke/master"
+    "/licence-status/{app}/{email_sha256}.txt",
 ).strip()
 
 refresh_licence = GATE.refresh_licence
