@@ -1,7 +1,10 @@
 # fake-trial-poke
 
-Windows 假試撮盤前監控工具。原始碼與操作說明位於
+假試撮盤前監控工具。原始碼與操作說明位於
 [`系統檔案/README.md`](系統檔案/README.md)。
+
+正式出貨對象是 Windows；macOS 與 Linux 可跑原始碼模式，狀態與限制見
+[macOS / Linux 支援](#macos--linux-支援)。
 
 ## 授權版 release
 
@@ -98,3 +101,72 @@ keyguard issue FAKE_TRIAL_POKE buyer@example.com `
 ```
 
 簽發出的 `KG1...` key 應以私密管道交付，不應當作公開 release asset。
+
+## macOS / Linux 支援
+
+| 層次 | macOS | Linux | 說明 |
+| --- | --- | --- | --- |
+| 相依套件 | 可 | 可 | `shioaji==1.3.2`、`pysolace==0.9.53` 都有 `macosx_11_0_arm64`／`macosx_10_15_x86_64`／`manylinux` 的 cp312 wheel |
+| 原始碼模式 | 可 | 可 | `./install.sh` + `./launch.command` |
+| 每日排程 | 可（launchd） | 需自理 | `schedule_morning.sh`；Linux 請自掛 systemd timer / cron |
+| 授權閘門 | 可 | 可 | keyguard 的 machine id、拒絕視窗、狀態抓取都是跨平台的 |
+| 打包成 app | spec 已備妥 | 未支援 | `fake-trial-poke-macos.spec`，但產線與出貨閘門仍是 Windows-only（見下） |
+| 安裝程式 | 未支援 | 未支援 | Inno Setup 只有 Windows |
+
+**尚未在實機驗證。** 以上 macOS 路徑是照著 Windows 版逐項對應寫出來的，
+在這台 Windows 開發機上只能驗證到「語法正確、Windows 行為不變、跨平台
+靜態檢查通過」。第一次在 Mac 上跑請預期要修一些東西。
+
+### macOS 快速開始（原始碼模式）
+
+```bash
+cd 系統檔案
+chmod +x install.sh launch.command schedule_morning.sh   # 從 Windows 帶過來的 checkout 需要
+./install.sh          # 找 Python 3.12 → .venv → 相依套件 → 驗金鑰 → 掛 launchd 排程
+./launch.command      # 起服務並開瀏覽器（Finder 雙擊亦可）
+./schedule_morning.sh --mode status
+./schedule_morning.sh --mode unregister
+```
+
+排程限制與 Windows 不同：`schedule_morning.sh` 裝的是**使用者層
+LaunchAgent**，08:25 時該 macOS 帳號必須已登入。Windows 那條「開機未登入
+也能錄」的 S4U 路徑在 macOS 需要 root 安裝 LaunchDaemon，本專案刻意不做。
+
+### macOS 打包（未完成的部分）
+
+`fake-trial-poke-macos.spec` 可以產出 `.app`：
+
+```bash
+./系統檔案/.venv/bin/python -m PyInstaller fake-trial-poke-macos.spec --clean
+```
+
+需要圖示時先產生 `static/gs-icon.icns`（沒有的話 spec 會自動略過圖示）：
+
+```bash
+mkdir -p gs-icon.iconset && sips -z 512 512 static/gs-icon.png \
+  --out gs-icon.iconset/icon_512x512.png && iconutil -c icns gs-icon.iconset \
+  -o static/gs-icon.icns
+```
+
+打包相依（pywebview / pyobjc；tkinter 需另裝）見
+[`系統檔案/requirements-macos.txt`](系統檔案/requirements-macos.txt)。
+
+但**還不足以出貨**，缺的是閘門而不是產物：
+
+- `pack.config.ps1` 的兩道閘門跑在 PowerShell + Inno Setup 的 Windows 產線
+  （gs-app-pack）上，macOS 沒有對應物。
+- `keyguard.refusalcheck` 在非 Windows 直接回報 SKIP，`packagecheck` 的視窗
+  檢查同理。[`tools/verify-refusal-macos.sh`](tools/verify-refusal-macos.sh)
+  補了同一件事（暫時 APPDATA → 推過到期日 → 斷言視窗在、PORT 沒開），
+  但它是手動執行，不像 Windows 那樣是 build 過不了就不給出貨的閘門。
+- 未處理簽章與公證（codesign / notarytool）。沒公證的 .app 在對方機器上會
+  被 Gatekeeper 擋下，那個失敗看起來會跟授權拒絕一模一樣。
+
+在把拒絕驗證接進產線之前，`.app` 應視為開發／實測用產物，不要當授權版
+發給客戶。
+
+### 撤銷／復權實測
+
+要在 Mac 上驗證 admin console 的撤銷與復權會不會讓拒絕視窗出現／消失，
+完整的逐步操作指示在
+[`docs/macos-revocation-test.md`](docs/macos-revocation-test.md)。

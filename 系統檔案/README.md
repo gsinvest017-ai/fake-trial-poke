@@ -1,11 +1,15 @@
 # 假試撮盤前監控：接手人操作指南
 
-這是一套 Windows 可攜式盤前資料錄製系統。安裝後，使用者只需雙擊
-啟動檔，即可在背景啟動服務並開啟當日前端：
+這是一套可攜式盤前資料錄製系統，正式出貨對象是 Windows。安裝後，使用者
+只需雙擊啟動檔，即可在背景啟動服務並開啟當日前端：
 
 ```text
 http://127.0.0.1:8900/
 ```
+
+macOS 有一組一一對應的入口（`install.sh` / `launch.command` /
+`schedule_morning.sh`），詳見本檔最後的〈macOS 操作路徑〉與根目錄 README
+的支援矩陣。以下未特別註明處皆為 Windows 說明。
 
 ## 最短操作路徑
 
@@ -157,3 +161,34 @@ service.py
 不需自行刪除 `.venv`；修正網路問題後直接重跑 `一鍵啟動.vbs` 即可。
 若自動安裝 Python 的兩條路徑都失敗，先人工安裝 64 位元 Python 3.12
 再重跑；啟動器會重新偵測絕對路徑，不依賴同一個命令視窗的 PATH 更新。
+
+## macOS 操作路徑
+
+三個入口與 Windows 一一對應：
+
+| Windows | macOS | 作用 |
+| --- | --- | --- |
+| `安裝環境.bat` / `install.bat` | `install.sh` | 建 `.venv`、裝相依、驗金鑰、掛排程 |
+| `一鍵啟動.vbs` / `launch.vbs` | `launch.command` | 沿用或啟動服務、等健康檢查、開瀏覽器 |
+| `schedule_morning.ps1` | `schedule_morning.sh` | 每日 08:25 排程（launchd） |
+
+```bash
+chmod +x install.sh launch.command schedule_morning.sh
+./install.sh
+./launch.command
+```
+
+行為差異（都是平台限制，不是疏漏）：
+
+- **不會自動幫你裝 Python。** Windows 版會走 winget 或 python.org；macOS
+  上代替使用者裝 Python 會撞上 Homebrew / pyenv / 系統 Python 的 PATH 與
+  權限衝突，失敗方式比「缺 Python」本身更難查。找不到就明講並要你
+  `brew install python@3.12`。
+- **排程需要登入。** LaunchAgent 只在使用者已登入的 GUI session 生效，
+  等同 Windows 未取得 UAC 時降級的 Interactive 排程。Windows 的 S4U
+  對應物是 root 安裝的 LaunchDaemon，本專案不做。
+- **重試方式不同。** Task Scheduler 的「每 2 分鐘重複、持續 45 分鐘」在
+  launchd 沒有等價欄位，改以 08:25–09:09 之間每 2 分鐘一個
+  `StartCalendarInterval` 展開；每次觸發都先做健康檢查，服務已在跑就
+  直接結束，不會開第二份。
+- `.env` 的保密要求完全相同，見上方〈金鑰與交付安全〉。
