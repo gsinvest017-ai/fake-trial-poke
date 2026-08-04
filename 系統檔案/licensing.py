@@ -145,6 +145,14 @@ except ImportError:
         def licence_inboxes(cls) -> list:
             return [cls.state_dir() / "licences"]
 
+        @classmethod
+        def status_cache_path(cls) -> Path:
+            return cls.state_dir() / "licence-status.json"
+
+        @staticmethod
+        def revocation() -> Optional[dict]:
+            return None
+
         @staticmethod
         def exit_with_message(state, code: int = 2) -> None:
             raise SystemExit(code)
@@ -196,6 +204,13 @@ STATUS_URL = os.environ.get(
 
 refresh_licence = GATE.refresh_licence
 licence_inboxes = GATE.licence_inboxes
+#: Where the last status statement this client believed is cached, and what it
+#: currently says. Exposed so `--licence-refresh` can show *which* statement is
+#: in force: during a revocation test the only way to tell "the new statement
+#: arrived" from "I am still looking at the cached one" is statement_utc, and a
+#: statement is only accepted when that value increases.
+status_cache_path = GATE.status_cache_path
+revocation = GATE.revocation
 exit_with_message = GATE.exit_with_message
 check_state = GATE.check
 

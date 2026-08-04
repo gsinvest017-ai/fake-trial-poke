@@ -9,6 +9,13 @@ static/
 installer.iss
 release-build.*.log
 
+# 從專案根目錄跑 .app 或工具腳本時會掉在這裡的東西。系統檔案/.gitignore
+# 已經擋掉同名的檔案，但根目錄沒有——而 shioaji 是把 shioaji.log 寫到
+# 「當下的工作目錄」，跑一次 tools/pack-macos.sh 的 smoke test 就會出現。
+__pycache__/
+*.py[co]
+*.log
+
 # Local licence delivery material must never be published.
 delivery/
 *.licence.txt

@@ -145,6 +145,11 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--activate", metavar="KEY")
     parser.add_argument("--licence-email", metavar="EMAIL")
     parser.add_argument("--licence-status", action="store_true")
+    parser.add_argument(
+        "--licence-refresh",
+        action="store_true",
+        help="向廠商取得最新授權狀態後再回報（--licence-status 只讀本機快取）",
+    )
     parser.add_argument("--machine-id", action="store_true")
     return parser
 
@@ -240,6 +245,38 @@ def main(argv: list[str] | None = None) -> int:
             )
         )
         return 0
+    if args.licence_refresh:
+        # `--licence-status` reads the local cache only. That is the right
+        # default -- it must not depend on the network -- but it makes a
+        # revocation impossible to observe without launching the GUI and
+        # guessing at what a missing window means. When the supplier has just
+        # published a withdrawal, "did it arrive?" is exactly the question, and
+        # this is the answer that does not require interpreting a bounce in the
+        # Dock.
+        licensing.attach_parent_console()
+        note = licensing.refresh_licence(url=licensing.STATUS_URL)
+        state = licensing.check()
+        report = {
+            "source": licensing.STATUS_URL,
+            "note": note or "(取得狀態時沒有任何訊息)",
+            "state": state.to_dict(),
+        }
+        # statement_utc is what distinguishes "the new statement arrived" from
+        # "still looking at the cached one" -- a statement is only accepted when
+        # it increases, so during a test this is the field to watch.
+        try:
+            cache_path = licensing.status_cache_path()
+            report["statement_cache"] = json.loads(
+                cache_path.read_text(encoding="utf-8")
+            )
+            report["statement_cache_path"] = str(cache_path)
+        except (OSError, ValueError):
+            report["statement_cache"] = None
+            report["statement_cache_path"] = str(licensing.status_cache_path())
+        print(json.dumps(report, indent=2, ensure_ascii=False))
+        # Non-zero when the licence would refuse, so a script can gate on it
+        # without parsing the JSON.
+        return 0 if state.allowed else 2
 
     _refuse_if_unlicensed()
 
@@ -256,8 +293,13 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         import webview
-    except ImportError:
-        LOG.error("pywebview is missing from this build")
+    except ImportError as exc:
+        # Report what actually failed, not a guess. On the first real macOS
+        # build `webview` itself was bundled correctly and the missing piece
+        # was its dependency `bottle` -- and "pywebview is missing from this
+        # build" sent the search in exactly the wrong direction. The import
+        # error already names the culprit; print it.
+        LOG.error("could not import pywebview: %s", exc)
         return 1
 
     webview.create_window(

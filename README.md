@@ -3,7 +3,8 @@
 假試撮盤前監控工具。原始碼與操作說明位於
 [`系統檔案/README.md`](系統檔案/README.md)。
 
-正式出貨對象是 Windows；macOS 與 Linux 可跑原始碼模式，狀態與限制見
+正式出貨對象是 Windows；macOS 另有一組對應的原始碼模式、排程與打包產線，
+Linux 只跑原始碼模式。狀態與限制見
 [macOS / Linux 支援](#macos--linux-支援)。
 
 ## 授權版 release
@@ -51,6 +52,18 @@ keyguard verify-refusal `
 
 它會在一個暫時的 `APPDATA` 裡把授權池推過到期日（**不動你真正的啟用狀態**），
 啟動已安裝的 exe，抓到拒絕視窗、截圖，並確認關掉視窗後行程以非零退出。
+
+macOS 上 `verify-refusal` 會直接回報 SKIP，等價物是
+[`tools/verify-refusal-macos.sh`](tools/verify-refusal-macos.sh)（`--check-recovery`
+會一併驗證續期後服務回得來）。它已經是
+[`tools/pack-macos.sh`](tools/pack-macos.sh) 的 Gate 4，正常出貨流程不需要
+自己跑：
+
+```bash
+./tools/verify-refusal-macos.sh \
+  --app "/Applications/Fake Trial Poke.app" \
+  --email buyer@example.com --check-recovery
+```
 
 ### 客戶啟用
 
@@ -110,12 +123,23 @@ keyguard issue FAKE_TRIAL_POKE buyer@example.com `
 | 原始碼模式 | 可 | 可 | `./install.sh` + `./launch.command` |
 | 每日排程 | 可（launchd） | 需自理 | `schedule_morning.sh`；Linux 請自掛 systemd timer / cron |
 | 授權閘門 | 可 | 可 | keyguard 的 machine id、拒絕視窗、狀態抓取都是跨平台的 |
-| 打包成 app | spec 已備妥 | 未支援 | `fake-trial-poke-macos.spec`，但產線與出貨閘門仍是 Windows-only（見下） |
-| 安裝程式 | 未支援 | 未支援 | Inno Setup 只有 Windows |
+| 打包成 app | 可 | 未支援 | `fake-trial-poke-macos.spec` + [`tools/pack-macos.sh`](tools/pack-macos.sh) 產線與四道閘門（見下） |
+| 安裝程式 | 可（DMG） | 未支援 | `pack-macos.sh --dmg`；Inno Setup 只有 Windows |
 
-**尚未在實機驗證。** 以上 macOS 路徑是照著 Windows 版逐項對應寫出來的，
-在這台 Windows 開發機上只能驗證到「語法正確、Windows 行為不變、跨平台
-靜態檢查通過」。第一次在 Mac 上跑請預期要修一些東西。
+**已在實機驗證（Apple Silicon、macOS 26）。** 原始碼模式、launchd 排程與
+`.app` 建置都在 Mac 上實際跑過。當初預期的「第一次在 Mac 上跑要修一些
+東西」確實發生，共四處，都已修掉並補上回歸測試：
+
+| 症狀 | 真正的原因 |
+| --- | --- |
+| 每日 08:25 排程安靜地什麼都沒錄 | launchd 的 PATH 沒有 Homebrew，`resolve_python` 退回系統內建的 Python 3.9，`service.py` 死在 `TypeError`，只留一行在 `log/schedule.log` |
+| 中文錯誤訊息變成 `MODE?: unbound variable` | macOS 只有 bash 3.2，UTF-8 locale 下會把 `$VAR` 後面的中文字吃進變數名（C locale 反而正常，所以 launchd 過、手動跑壞） |
+| `.app` 起得來但視窗從不出現 | `bottle` / `proxy_tools` 沒被收進包裡——`collect_all()` 不跟進套件自己的第三方相依 |
+| `Symbol not found: _X509_STORE_get1_objects` | `pysolace` 的 wheel 自帶 OpenSSL 3.0.8，PyInstaller 依檔名去重時留下它、丟掉 `_ssl` 編譯時對著的 3.6.3 |
+
+尚未驗證的只剩需要 KEYGUARD 與 Apple Developer 憑證的環節：Gate 0 的
+keyguard 檢查、Gate 2、Gate 4，以及簽章與公證。那些在有憑證的機器上才跑
+得起來。
 
 ### macOS 快速開始（原始碼模式）
 
@@ -132,38 +156,66 @@ chmod +x install.sh launch.command schedule_morning.sh   # 從 Windows 帶過來
 LaunchAgent**，08:25 時該 macOS 帳號必須已登入。Windows 那條「開機未登入
 也能錄」的 S4U 路徑在 macOS 需要 root 安裝 LaunchDaemon，本專案刻意不做。
 
-### macOS 打包（未完成的部分）
+### macOS 打包
 
-`fake-trial-poke-macos.spec` 可以產出 `.app`：
+[`tools/pack-macos.sh`](tools/pack-macos.sh) 是 macOS 的產線，位置等同
+Windows 的 `gs-app-pack` + `pack.config.ps1`。它不只產生檔案——它的價值跟
+Windows 版一樣在閘門：**任何一道過不了就不會留下可出貨的產物。**
 
 ```bash
-./系統檔案/.venv/bin/python -m PyInstaller fake-trial-poke-macos.spec --clean
+# 正式出貨
+./tools/pack-macos.sh --clean --dmg \
+    --sign-identity "Developer ID Application: GS Invest (TEAMID)" \
+    --notarize-profile gs-notary \
+    --licence-email buyer@example.com
+
+# 開發建置（豁免必須明講，且結果會標記為不可出貨）
+./tools/pack-macos.sh --clean --allow-unsigned --skip-notarize \
+    --licence-email you@example.com
 ```
 
-需要圖示時先產生 `static/gs-icon.icns`（沒有的話 spec 會自動略過圖示）：
+`--notarize-profile` 指的是 notarytool 的 keychain profile，先建一次：
 
 ```bash
-mkdir -p gs-icon.iconset && sips -z 512 512 static/gs-icon.png \
-  --out gs-icon.iconset/icon_512x512.png && iconutil -c icns gs-icon.iconset \
-  -o static/gs-icon.icns
+xcrun notarytool store-credentials gs-notary \
+    --apple-id <apple id> --team-id <team id> --password <app 專用密碼>
+```
+
+四道閘門，對應 `pack.config.ps1` 的 `$PostBuildCheck`：
+
+| 閘門 | 問的問題 | Windows 對應 |
+| --- | --- | --- |
+| Gate 0 前置 | keyguard 是非 editable 安裝嗎？`AppGate.refusal_ui()` 是 `window` 嗎？ | `$RequireNonEditable` |
+| Gate 1 Gatekeeper | `spctl` 會放行嗎？ | 無（Windows 不需要） |
+| Gate 2 凍結 | 做完的 `.app` 裡真的有 keyguard 嗎？ | `keyguard.packagecheck` |
+| Gate 3 smoke | 供得出 HTTP UI，而且**持續**供得出嗎？ | `smoke_launch.py` |
+| Gate 4 拒絕 | 憑證失效擋得住、而且沒有偷偷開 port 嗎？續期後又回得來嗎？ | `keyguard.refusalcheck` |
+
+兩個刻意的設計：
+
+- **`packagecheck` 的 SKIP 不算通過。** `keyguard.refusalcheck` 與
+  `packagecheck` 的視窗檢查在非 Windows 會直接回報 SKIP，所以 Gate 2 與
+  Gate 4 另外做行為檢查（問產物 `--licence-status`、跑
+  [`tools/verify-refusal-macos.sh`](tools/verify-refusal-macos.sh)）。
+  把 SKIP 當成 PASS 的話，這整支腳本就沒有存在意義。
+- **先簽章公證，再跑行為閘門。** `codesign` 會改寫 bundle，反過來做的話，
+  通過測試的產物跟實際出貨的產物就不是同一個。
+
+圖示由 [`tools/make-icns.py`](tools/make-icns.py) 產生（產線會自動呼叫），
+十個尺寸都畫，不需要任何來源圖檔，配色與 Windows 版的 `.ico` 相同：
+
+```bash
+python3 tools/make-icns.py          # → static/gs-icon.icns
 ```
 
 打包相依（pywebview / pyobjc；tkinter 需另裝）見
 [`系統檔案/requirements-macos.txt`](系統檔案/requirements-macos.txt)。
 
-但**還不足以出貨**，缺的是閘門而不是產物：
-
-- `pack.config.ps1` 的兩道閘門跑在 PowerShell + Inno Setup 的 Windows 產線
-  （gs-app-pack）上，macOS 沒有對應物。
-- `keyguard.refusalcheck` 在非 Windows 直接回報 SKIP，`packagecheck` 的視窗
-  檢查同理。[`tools/verify-refusal-macos.sh`](tools/verify-refusal-macos.sh)
-  補了同一件事（暫時 APPDATA → 推過到期日 → 斷言視窗在、PORT 沒開），
-  但它是手動執行，不像 Windows 那樣是 build 過不了就不給出貨的閘門。
-- 未處理簽章與公證（codesign / notarytool）。沒公證的 .app 在對方機器上會
-  被 Gatekeeper 擋下，那個失敗看起來會跟授權拒絕一模一樣。
-
-在把拒絕驗證接進產線之前，`.app` 應視為開發／實測用產物，不要當授權版
-發給客戶。
+**還沒有實際跑過完整產線。** Gate 0 的 keyguard 檢查、Gate 2、Gate 4 需要
+建置環境裝好 KEYGUARD，Gate 1 需要 Apple Developer 憑證，這台驗證機兩者
+都沒有。已驗證的是：閘門在缺 keyguard 時確實擋下建置（不是放行），`.app`
+本身建得出來、跑得起來、持續供得出 HTTP UI。第一次帶著憑證跑完整產線時，
+仍請預期 Gate 1 與 Gate 4 要調整。
 
 ### 撤銷／復權實測
 

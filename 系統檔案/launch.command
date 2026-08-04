@@ -74,9 +74,9 @@ while [ "$SECONDS" -lt "$deadline" ]; do
         exit 0
     fi
     if ! kill -0 "$SERVICE_PID" 2>/dev/null; then
-        die "服務啟動後隨即結束。詳見 $LAUNCH_LOG（該檔不會列印金鑰）。"
+        die "服務啟動後隨即結束。詳見 ${LAUNCH_LOG}（該檔不會列印金鑰）。"
     fi
     sleep 1
 done
 
-die "服務在 ${WAIT_SECONDS} 秒內未通過 $HEALTH 健康檢查。詳見 $LAUNCH_LOG。"
+die "服務在 ${WAIT_SECONDS} 秒內未通過 $HEALTH 健康檢查。詳見 ${LAUNCH_LOG}。"
