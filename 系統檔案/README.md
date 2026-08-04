@@ -191,4 +191,12 @@ chmod +x install.sh launch.command schedule_morning.sh
   launchd 沒有等價欄位，改以 08:25–09:09 之間每 2 分鐘一個
   `StartCalendarInterval` 展開；每次觸發都先做健康檢查，服務已在跑就
   直接結束，不會開第二份。
+- **排程只認絕對路徑的 Python。** launchd 給的 `PATH` 只有
+  `/usr/bin:/bin:/usr/sbin:/sbin`，不含 Homebrew 與 pyenv。所以
+  `schedule_morning.sh` 不靠 `command -v` 找直譯器，而是逐一試
+  `.venv/bin/python`、`$PYTHON312_EXE`、Homebrew、pyenv、python.org 的
+  絕對路徑，且每個都要通過 3.12／64 位元檢查。**刻意不退回
+  `/usr/bin/python3`**——那是系統內建的 3.9，跑不動本專案，而它失敗的方式
+  是在 `log/schedule.log` 裡留一行 `TypeError` 然後每日錄製安靜地不發生。
+  排程沒動作時，第一個該看的就是這個檔。
 - `.env` 的保密要求完全相同，見上方〈金鑰與交付安全〉。

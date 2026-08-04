@@ -340,11 +340,15 @@ ACTIVE 會蓋掉快取裡的 REVOKED。反過來不成立 —— 舊的 ACTIVE �
 cd /path/to/fake-trial-poke
 ./tools/verify-refusal-macos.sh \
   --app "/Applications/Fake Trial Poke.app" \
-  --email gsinvest018@gsinvest.com.tw
+  --email gsinvest018@gsinvest.com.tw --check-recovery
 ```
 
 **預期看到**：`PASS=n FAIL=0` 與 `拒絕行為驗證通過。`，並產出
 `refusal-macos.png`。
+
+`--check-recovery` 會在拒絕驗完之後把授權池推回未來，確認服務**回得來**。
+少了這一條，一支「無論如何都拒絕」的閘門也會拿滿分——那不是防盜，是把付費
+客戶鎖在門外。
 
 視窗標題偵測與截圖需要「輔助使用」與「螢幕錄製」權限（系統設定 → 隱私權
 與安全性）。沒授權會降級成 `[WARN]`，不會誤判成失敗。
@@ -372,5 +376,7 @@ macOS 上「按了沒反應」有五種來源，畫面上長得都一樣：
   要重新 publish 一次。
 - **只會延長，不會縮短。** 自動撿到的 key 只有在到期日更晚時才套用。
 - **macOS 沒有 `keyguard refusalcheck`。** 它在 `sys.platform != "win32"`
-  直接 SKIP，所以 macOS build 少了 Windows 產線那道自動出貨閘門。
-  `tools/verify-refusal-macos.sh` 補的是同一件事，但它不在 CI 裡，要自己跑。
+  直接 SKIP。等價物是 `tools/verify-refusal-macos.sh`，而它已經是
+  `tools/pack-macos.sh` 的 Gate 4——過不了就不會產出可出貨的 `.app`，
+  跟 Windows 產線同一個位置。上面 STEP 11 是單獨跑它的方式，正常出貨
+  流程不需要手動執行。
