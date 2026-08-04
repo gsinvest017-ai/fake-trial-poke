@@ -151,16 +151,29 @@ for module in tkinter webview; do
 done
 
 # 直接問 keyguard 自己：這個環境做得出視窗嗎。這是 pack.config.ps1 註解裡
-# 指名的判準（refusal_ui() == "window"），比逐一猜相依套件可靠。
-if refusal_ui="$("$VENV_PYTHON" -c 'from keyguard.appgate import AppGate; print(AppGate.refusal_ui())' 2>/dev/null)"; then
-    if [ "$refusal_ui" = "window" ]; then
-        pass "AppGate.refusal_ui() == window"
-    else
-        fail "AppGate.refusal_ui() == ${refusal_ui}（需要 window）；拒絕會降級，客戶看不見。"
-    fi
-else
-    fail "問不到 AppGate.refusal_ui()（keyguard 不可用）"
-fi
+# 指名的判準，但那句 `AppGate.refusal_ui()` 不能照抄——它是 instance method，
+# 當 classmethod 呼叫會 TypeError。
+#
+# 而且不能就地問。refusal_ui() 的答案取決於「stderr 有沒有人看得到」，在
+# build 用的終端機裡永遠是「看得到」，所以答案永遠是 text。要問的是**出貨
+# 之後那個情境**：frozen、而且 stderr 不是 tty（Finder 雙擊）。
+refusal_ui="$("$VENV_PYTHON" - <<'PY' 2>/dev/null || true
+import sys
+sys.frozen = True                      # 模擬凍結後的 build
+class _NotATty:                        # 模擬 Finder 啟動：stderr 沒人看
+    def isatty(self): return False
+    def write(self, _): pass
+    def flush(self): pass
+sys.stderr = _NotATty()
+from keyguard.appgate import AppGate
+sys.stdout.write(AppGate("FAKE_TRIAL_POKE", app_name="fake-trial-poke").refusal_ui())
+PY
+)"
+case "$refusal_ui" in
+    window) pass "拒絕畫面會是視窗（frozen 且無 tty 時 refusal_ui() == window）" ;;
+    "")     fail "問不到 refusal_ui()（keyguard 不可用）" ;;
+    *)      fail "refusal_ui() == ${refusal_ui}（需要 window）；出貨後拒絕只會印到沒人看的地方。" ;;
+esac
 
 [ -n "$LICENCE_EMAIL" ] || fail "需要 --licence-email（或設 ${EMAIL_ENV}）：smoke test 與拒絕驗證都要它。"
 
