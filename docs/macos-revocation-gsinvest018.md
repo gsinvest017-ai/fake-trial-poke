@@ -87,9 +87,13 @@ licence refresh: skipping … -- no existing licence to renew (status trial)
 
 ### 3.1 這台 Mac：取得 machine id
 
+兩條都可以，輸出一樣：
+
 ```bash
-cd ~/fake-trial-poke
-./系統檔案/.venv/bin/python app.py --machine-id
+cd ~/fake-trial-poke/系統檔案
+
+./.venv/bin/keyguard machine                    # keyguard 自己的子指令
+./.venv/bin/python ../app.py --machine-id       # 應用程式包裝過的同一個值
 ```
 
 目前這台是：
@@ -99,6 +103,17 @@ MID_494cc46470dd14f6b80e0621
 ```
 
 把這串給 IT admin。它是硬體衍生的，重裝系統前不會變。
+
+> **三個容易踩的坑：**
+>
+> * `--machine-id`（有連字號）是 **fake-trial-poke 的 `app.py`** 的旗標；
+>   keyguard 這邊是 **`machine` 子指令**。兩個專案都有一支 `app.py`。
+> * `KEYGUARD/src/admin/app.py` 是 console 的 web app，不是 CLI，而且它是套件
+>   內的模組——直接 `python3 src/admin/app.py` 一定會是
+>   `ImportError: attempted relative import with no known parent package`。
+>   要跑就 `python -m keyguard …`。
+> * **不要用系統的 `python3`**（macOS 內建是 3.9），keyguard 需要 3.12。
+>   一律走 `系統檔案/.venv/bin/` 底下那支。
 
 ### 3.2 IT admin（Windows）：登記 licensee 並簽一張綁機器的授權
 
