@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import shutil
 import socket
 import sys
@@ -13,9 +14,34 @@ import time
 from pathlib import Path
 
 
+APP_FOLDER_NAME = "fake-trial-poke"
+
+
+def _frozen_runtime_dir() -> Path:
+    """Where a packaged build keeps the data it writes.
+
+    Windows keeps it beside the executable, which is where every installed
+    copy already has its `data\\`, `log\\` and `.env` -- moving it would strand
+    those. A macOS `.app` cannot do the same: `sys.executable` sits inside
+    `Fake Trial Poke.app/Contents/MacOS`, and writing there means the recording
+    lives inside the bundle, breaks the code signature, and is thrown away by
+    the next drag-and-drop upgrade. Application Support is the writable place
+    macOS actually offers.
+    """
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Application Support" / APP_FOLDER_NAME
+    if sys.platform.startswith("linux"):
+        base = os.environ.get("XDG_DATA_HOME") or str(
+            Path.home() / ".local" / "share"
+        )
+        return Path(base) / APP_FOLDER_NAME
+    return Path(sys.executable).resolve().parent
+
+
 if getattr(sys, "frozen", False):
     BUNDLE_DIR = Path(sys._MEIPASS)  # type: ignore[attr-defined]
-    RUNTIME_DIR = Path(sys.executable).resolve().parent
+    RUNTIME_DIR = _frozen_runtime_dir()
+    RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
 else:
     BUNDLE_DIR = Path(__file__).resolve().parent / "系統檔案"
     RUNTIME_DIR = BUNDLE_DIR

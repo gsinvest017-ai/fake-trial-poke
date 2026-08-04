@@ -1,0 +1,38 @@
+# 版本庫內一律 LF（現有檔案已經是），checkout 時再依平台還原。
+* text=auto
+
+# 這些必須是 CRLF 才會動：cmd.exe 與 WSH 會把行尾的 CR 一起吃進 token，
+# 少了它 goto 標籤與 VBS 續行都會壞掉。開發機是 Windows，平常看不出來，
+# 但只要有人在 macOS 上編輯過就會壞。
+*.bat   text eol=crlf
+*.cmd   text eol=crlf
+*.vbs   text eol=crlf
+*.iss   text eol=crlf
+
+# 反過來，這些必須是 LF：bash 讀到 CRLF 會把 \r 當成指令的一部分，
+# 症狀是 "$'\r': command not found" 這種看不出所以然的錯誤。
+# 本 repo 在 Windows 上開發且 core.autocrlf=true，沒有這條就會被轉成 CRLF。
+*.sh        text eol=lf
+*.command   text eol=lf
+*.plist     text eol=lf
+
+# PowerShell 兩種行尾都能跑；固定 CRLF 只是為了跟 Windows 產線一致。
+*.ps1   text eol=crlf
+
+*.py    text
+*.md    text
+*.json  text
+*.jsonl text
+*.html  text
+*.css   text
+*.js    text
+*.txt   text
+*.yml   text
+*.yaml  text
+
+*.png   binary
+*.ico   binary
+*.icns  binary
+*.exe   binary
+*.dll   binary
+*.pyd   binary

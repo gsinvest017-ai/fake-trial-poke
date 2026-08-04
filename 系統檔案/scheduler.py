@@ -1,8 +1,9 @@
 #!/usr/bin/env python
-"""手動備援看門狗；正式主入口是 schedule_morning.ps1 的 Windows 排程。
+"""手動備援看門狗；正式主入口是排程器（Windows: schedule_morning.ps1／
+macOS: schedule_morning.sh 的 launchd agent）。
 
-請勿讓本程式與「假試撮盤前監控」同時常駐。沒有 Task Scheduler 的環境
-才使用本程式確保同一個 service.py 已在 PORT 8900 提供 UI 與 live 錄製。
+請勿讓本程式與「假試撮盤前監控」同時常駐。沒有 Task Scheduler / launchd 的
+環境才使用本程式確保同一個 service.py 已在 PORT 8900 提供 UI 與 live 錄製。
 """
 
 from __future__ import annotations
@@ -10,7 +11,6 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import msvcrt
 import os
 import socket
 import subprocess
@@ -24,6 +24,19 @@ from pathlib import Path
 from typing import Any
 
 import control_state
+
+# service.py 用同一組備援取得 live 錄製鎖；此處刻意保持一致的寫法，
+# 因為 msvcrt 只存在於 Windows，模組層硬 import 會讓非 Windows 連載入
+# 本模組都失敗（連 --help 都跑不起來）。
+try:
+    import msvcrt
+except ImportError:  # pragma: no cover - 正式環境為 Windows
+    msvcrt = None  # type: ignore[assignment]
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Windows 沒有 fcntl
+    fcntl = None  # type: ignore[assignment]
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -232,7 +245,12 @@ def get_service_health() -> ServiceHealth:
 
 
 def acquire_instance_lock() -> Any:
-    """取得 Windows 檔案鎖；handle 必須在看門狗常駐期間保持開啟。"""
+    """取得 OS 級檔案鎖；handle 必須在看門狗常駐期間保持開啟。
+
+    Windows 用 msvcrt.locking，其餘平台用 fcntl.flock。兩者都是不可跨行程
+    共享的獨佔鎖，效果相同：第二份看門狗會在此直接失敗，而不是安靜地
+    跟著跑起來、兩份同時去戳同一個 service。
+    """
     handle = LOCK_PATH.open("a+b")
     handle.seek(0, os.SEEK_END)
     if handle.tell() == 0:
@@ -240,7 +258,15 @@ def acquire_instance_lock() -> Any:
         handle.flush()
     handle.seek(0)
     try:
-        msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        if msvcrt is not None:
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        elif fcntl is not None:  # pragma: no cover - 非 Windows 備援
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        else:  # pragma: no cover - 無可用 OS lock 的極端環境
+            handle.close()
+            raise RuntimeError(
+                "本平台沒有可用的檔案鎖，無法保證看門狗單一實例"
+            )
     except OSError as exc:
         handle.close()
         raise RuntimeError(
@@ -252,7 +278,10 @@ def acquire_instance_lock() -> Any:
 def release_instance_lock(handle: Any) -> None:
     handle.seek(0)
     try:
-        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        if msvcrt is not None:
+            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        elif fcntl is not None:  # pragma: no cover - 非 Windows 備援
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
     finally:
         handle.close()
 
@@ -262,6 +291,10 @@ def start_service() -> subprocess.Popen[bytes]:
         raise FileNotFoundError(f"找不到 {SERVICE_PATH.name}")
 
     command = [sys.executable, str(SERVICE_PATH)]
+    # 讓 service 不要跟著看門狗的 Ctrl-C／終端機一起被收掉。Windows 是
+    # CREATE_NEW_PROCESS_GROUP，POSIX 的對應物是 setsid（start_new_session）；
+    # 兩邊都必須用自己的那一個——POSIX 傳非 0 的 creationflags 會直接
+    # ValueError。
     creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
     LOGGER.info(
         "未偵測到健康 live 錄製服務，啟動 %s（PORT %s）",
@@ -273,6 +306,7 @@ def start_service() -> subprocess.Popen[bytes]:
         cwd=BASE_DIR,
         env=child_environment(),
         creationflags=creationflags,
+        start_new_session=os.name != "nt",
     )
 
 
