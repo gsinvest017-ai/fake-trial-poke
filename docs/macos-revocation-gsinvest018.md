@@ -115,6 +115,20 @@ MID_494cc46470dd14f6b80e0621
 > * **不要用系統的 `python3`**（macOS 內建是 3.9），keyguard 需要 3.12。
 >   一律走 `系統檔案/.venv/bin/` 底下那支。
 
+> ⚠️ **從 ssh 問 machine id 要先確認 keyguard 版本。** `ioreg` 在 `/usr/sbin`，
+> 而非互動 ssh 與 launchd 的 PATH 沒有它。舊版 keyguard 以裸名呼叫，讀不到就
+> 靜默回 `NO_MACHINEGUID`，於是**同一台 Mac 從終端機問和從 ssh 問會得到兩個
+> 不同的 id**，用其中一條路綁定的授權換另一條路就被拒。更糟的是退化後的
+> 原始字串是 `MG=NO_MACHINEGUID|HN=<hostname>`，機器綁定實際上只綁 hostname。
+> 已在 KEYGUARD `fix/macos-state-dir` 修掉（改用絕對路徑）。驗證方式：
+>
+> ```bash
+> env -i PATH=/usr/bin:/bin HOME="$HOME" /bin/sh -c \
+>   '"$HOME/fake-trial-poke/系統檔案/.venv/bin/keyguard" machine'
+> ```
+>
+> 這條的輸出必須和互動 shell 完全一樣。不一樣就是 keyguard 還沒更新。
+
 ### 3.2 IT admin（Windows）：登記 licensee 並簽一張綁機器的授權
 
 console：`keyguard admin --key C:\Users\User\.keyguard-vendor\gs_private.key`
@@ -292,7 +306,91 @@ FAKE_TRIAL_POKE_LICENCE_EMAIL=gsinvest018@gsinvest.com.tw \
 
 ---
 
-## 7. 已知限制
+## 7. 從 licence server 用 SSH 遠端佈署
+
+licence server（Windows，持私鑰）對這台 Mac 有免密 ssh，想讓 server 端的
+coding agent 一路把憑證設定完。可以，但有三條界線先講清楚。
+
+### 7.1 三條不能越的界線
+
+**私鑰永遠不過來。** ssh 過來的只有簽好的 `KG1…` 金鑰。`gs_private.key` 留在
+Windows，console 在那邊簽完再送結果。一旦私鑰複製到第二台機器，簽發能力就
+不只一份了。
+
+**`KG1` 金鑰不可以落進 repo。** `~/fake-trial-poke` 是 **public repository** 的
+工作目錄。金鑰要放進投放資料夾，不是專案目錄：
+
+```
+~/Library/Application Support/fake-trial-poke/licences/
+```
+
+（這個路徑是 KEYGUARD `fix/macos-state-dir` 修正後的位置。修正前 keyguard 會
+把整個授權狀態寫進 `~/fake-trial-poke`，也就是 git working tree——`licence.json`
+離被 commit 只差一個 `git add`。）
+
+**release 裡沒有憑證。** 每個客戶下載的是**同一個** binary，授權不會被編譯
+進去。所謂「簽發專用憑證的 release」其實是兩件事：同一份 release ＋ 單獨投遞
+一把綁該機器的 `KG1`。server 端要做的是後者，不是為每個客戶產一個 build。
+
+### 7.2 目前的路障：沒有 macOS release asset
+
+```bash
+gh release view v0.1.4 -R gsinvest017-ai/fake-trial-poke \
+  --json assets --jq '.assets[].name'
+# → fake-trial-poke-setup.exe
+```
+
+**只有 Windows installer。** 所以「遠端指令讓這台 Mac 下載 release」現在下載
+不到東西。要先跑 `tools/pack-macos.sh --dmg` 產出 `.app` / DMG 並掛上 release，
+而那條產線的 Gate 1 需要 Apple Developer 憑證——沒有簽章與公證的話，下載來的
+`.app` 會被 Gatekeeper 擋下，**而那個失敗看起來跟授權拒絕一模一樣**。
+
+在補上 macOS asset 之前，server 端能做的是「佈署授權」，不是「佈署 release」。
+
+### 7.3 指令序列
+
+在 Windows 上（`mac` 是 ssh host alias）：
+
+```bash
+# 1. 取 machine id。絕對路徑，因為非互動 ssh 的 PATH 很小。
+MID=$(ssh mac '"$HOME/fake-trial-poke/系統檔案/.venv/bin/keyguard" machine')
+echo "$MID"          # 必須是 MID_494cc46470dd14f6b80e0621
+
+# 2. 在 Windows 上簽（私鑰不離開這裡）
+keyguard issue FAKE_TRIAL_POKE gsinvest018@gsinvest.com.tw \
+  --key ~/.keyguard-vendor/gs_private.key \
+  --machine-id "$MID" --expires 2027-08-04 --seats 1 --plan PRO
+# → KG1...
+
+# 3. 投遞到 inbox（不是專案目錄）。下次啟動自動撿走，客戶不用打指令。
+INBOX='$HOME/Library/Application Support/fake-trial-poke/licences'
+ssh mac "mkdir -p \"$INBOX\""
+printf '%s\n' "$KG1" | ssh mac "cat > \"$INBOX/gsinvest018.txt\""
+
+# 4. 發布狀態樹（撤銷／復權都靠這棵樹）
+keyguard publish-status -o licence-status --app FAKE_TRIAL_POKE
+git add licence-status && git commit -m "chore: 發布授權狀態" && git push origin master
+
+# 5. 驗證。exit 0 = 放行，exit 2 = 被拒——agent 直接用退出碼判斷，
+#    不需要解析 JSON，也不需要開 GUI 猜「沒跳視窗」是什麼意思。
+ssh mac 'FAKE_TRIAL_POKE_LICENCE_EMAIL=gsinvest018@gsinvest.com.tw \
+  "$HOME/fake-trial-poke/系統檔案/.venv/bin/python" \
+  "$HOME/fake-trial-poke/app.py" --licence-refresh'
+echo "exit=$?"
+```
+
+撤銷之後重跑第 5 步，等到 `exit=2` 就是聲明已經抵達並生效。復權後等到
+`exit=0`。中間卡住時看輸出裡的 `statement_cache.statement_utc` 有沒有前進——
+沒前進就是 CDN 還沒更新（1–4 分鐘），不是壞掉。
+
+### 7.4 ssh 環境的兩個陷阱
+
+* **一律用絕對路徑。** 非互動 ssh 不會載入 fish/zsh 的 rc，`keyguard` 與
+  `python` 都不在 PATH 上。
+* **不要用 `python3`。** 那是系統內建的 3.9，跑不動本專案。這與 launchd 排程
+  踩過的是同一個坑。
+
+## 8. 已知限制
 
 - **只在啟動時判定。** 撤銷不會打斷正在跑的行程。
 - **在你撤銷之前就把網路擋掉的客戶**，會一直用到金鑰自然到期。遠端撤銷提高
