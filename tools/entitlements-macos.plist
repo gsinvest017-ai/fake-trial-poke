@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Hardened Runtime 的例外清單。公證（notarization）強制要求 Hardened
+  Runtime，而 Hardened Runtime 的預設值會擋掉 PyInstaller + CPython +
+  WebKit 這個組合本來就要做的三件事。每一條都是「不加就跑不起來」，
+  不是「加了比較方便」——所以這裡沒有 com.apple.security.app-sandbox：
+  這是 Developer ID 直接分發，不是 App Store，開沙盒只會讓 Shioaji 的
+  連線與 ~/Library/Application Support 的寫入一起壞掉。
+-->
+<plist version="1.0">
+<dict>
+    <!--
+      CPython 會產生並執行動態程式碼（ctypes 的 closure、WebKit 的 JIT）。
+      少了這兩條，.app 會在啟動瞬間被 kill，退出碼看起來就像「按了沒反應」
+      ——跟授權拒絕在客戶眼中一模一樣，正是本專案最想避免的那種失敗。
+    -->
+    <key>com.apple.security.cs.allow-jit</key>
+    <true/>
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <true/>
+
+    <!--
+      PyInstaller 把 shioaji / pysolace / pyobjc 的 .so 攤在 Contents/
+      Frameworks 底下，它們的簽章與主執行檔不同（或根本沒有）。Hardened
+      Runtime 預設只讓同一個 Team ID 簽的函式庫載入，不關掉就會在 import
+      第一個 C 擴充時死掉。
+    -->
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+</dict>
+</plist>

@@ -31,6 +31,8 @@ DAYS_AGO=30
 SETTLE_SECONDS=12
 SHOT="refusal-macos.png"
 KEEP_SCRATCH=0
+CHECK_RECOVERY=0
+RECOVERY_TIMEOUT=60
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -40,6 +42,7 @@ while [ $# -gt 0 ]; do
         --shot) SHOT="${2:-}"; shift 2 ;;
         --days-ago) DAYS_AGO="${2:-30}"; shift 2 ;;
         --keep-scratch) KEEP_SCRATCH=1; shift ;;
+        --check-recovery) CHECK_RECOVERY=1; shift ;;
         *) echo "unknown argument: $1" >&2; exit 2 ;;
     esac
 done
@@ -167,10 +170,57 @@ else
     wait "$APP_PID" 2>/dev/null
     code=$?
     if [ "$code" -ne 0 ]; then
-        record PASS "行程以非零退出（$code）"
+        record PASS "行程以非零退出（${code}）"
     else
         record FAIL "行程以 0 退出——被拒絕卻回報成功"
     fi
+fi
+
+# ── 5. 復權：把授權推回未來，服務必須回得來 ───────────────────────────
+# 對應 Windows refusalcheck 的 --check-recovery。少了這一條，一支「無論如何
+# 都拒絕」的閘門也會拿到滿分——那不是防盜，那是永久卡死。廠商續期之後客戶
+# 開得起來，跟過期之後開不起來，是同一個機制的兩面，要一起證明。
+if [ "$CHECK_RECOVERY" = "1" ]; then
+    echo
+    echo "[復權] 把授權池推回未來，確認服務回得來 ..."
+    "$PYTHON" - "$POOL" <<'PY'
+import json, sys
+from datetime import datetime, timedelta, timezone
+
+path = sys.argv[1]
+data = json.load(open(path, encoding="utf-8"))
+renewed = datetime.now(timezone.utc) + timedelta(days=30)
+data["Plan"] = "PRO"
+data["Provisioned"] = True
+data["IssuedUtc"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+data["ExpiresUtc"] = renewed.strftime("%Y-%m-%dT%H:%M:%SZ")
+data["LicenceKey"] = ""
+json.dump(data, open(path, "w", encoding="utf-8"), indent=2)
+PY
+
+    env APPDATA="$SCRATCH" "$EMAIL_ENV=$EMAIL" \
+        "$EXE" --port "$PORT" >"$SCRATCH/recovery.log" 2>&1 &
+    RECOVERY_PID=$!
+
+    recovered=0
+    deadline=$((SECONDS + RECOVERY_TIMEOUT))
+    while [ "$SECONDS" -lt "$deadline" ]; do
+        if port_open; then
+            recovered=1
+            break
+        fi
+        kill -0 "$RECOVERY_PID" 2>/dev/null || break
+        sleep 1
+    done
+
+    if [ "$recovered" = "1" ]; then
+        record PASS "續期後服務回得來（PORT $PORT 已監聽）"
+    else
+        record FAIL "續期後服務仍起不來——這個閘門會把付費客戶鎖在門外。見 $SCRATCH/recovery.log"
+    fi
+
+    kill "$RECOVERY_PID" 2>/dev/null || true
+    wait "$RECOVERY_PID" 2>/dev/null || true
 fi
 
 echo

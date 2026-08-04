@@ -15,6 +15,8 @@ Windows 的 fake-trial-poke.spec 仍由 gs-app-pack 自動生成。
   * 多一層 BUNDLE()，產出真正的 .app；沒有它只會得到一個 Finder 不認得、
     也拿不到 GUI session 的裸執行檔。
 """
+import os
+import subprocess
 from pathlib import Path
 
 from PyInstaller.utils.hooks import collect_all
@@ -41,7 +43,20 @@ hiddenimports = []
 # 拒絕」跟「應用程式壞掉」在客戶眼中一模一樣。收進來之後可用
 # keyguard.appgate.AppGate.refusal_ui() == "window" 驗證。
 # macOS 上 webview 還會一併拉進 pyobjc 的 Cocoa / WebKit binding。
-for package in ('shioaji', 'pysolace', 'tzdata', 'tkinter', 'webview'):
+#
+# bottle / proxy_tools / typing_extensions 是 pywebview 自己宣告的執行期
+# 相依，必須逐一點名：collect_all() 只收該套件本身的檔案，不會跟進它的
+# 第三方相依；而 app.py 的 `import webview` 寫在 main() 裡（延遲 import），
+# 靜態分析看不到模組層的 import，整條相依鏈就這樣斷掉。
+#
+# 症狀特別會誤導：webview 本體確實會被收進 .app，缺的是 bottle，於是
+# app.py 的 except ImportError 會回報「pywebview is missing from this
+# build」——一句與事實相反的話。2026-08-04 在 macOS 實機建置時踩到：服務
+# 起得來、HTTP 回得了一下，然後行程就退出，視窗從來沒出現過。
+for package in (
+    'shioaji', 'pysolace', 'tzdata', 'tkinter', 'webview',
+    'bottle', 'proxy_tools', 'typing_extensions',
+):
     try:
         package_datas, package_binaries, package_hiddenimports = collect_all(package)
     except Exception as exc:                                  # noqa: BLE001
@@ -72,6 +87,45 @@ a = Analysis(
     noarchive=False,
     optimize=0,
 )
+
+
+def _openssl_that_ssl_was_built_against():
+    """CPython 的 _ssl 實際連結的 libcrypto / libssl 絕對路徑。"""
+    import _ssl
+
+    listing = subprocess.run(
+        ['otool', '-L', _ssl.__file__],
+        capture_output=True, text=True, check=True,
+    ).stdout
+    wanted = {}
+    for line in listing.splitlines()[1:]:
+        path = line.strip().split(' (')[0]
+        name = os.path.basename(path)
+        if name.startswith(('libcrypto.', 'libssl.')):
+            wanted[name] = str(Path(path).resolve())
+    return wanted
+
+
+# pysolace 的 wheel 自帶一份 OpenSSL 3.0.8（.dylibs/libcrypto.3.dylib）。
+# PyInstaller 依檔名去重，兩份 libcrypto.3.dylib 只會留一份——而它留下的是
+# pysolace 那份舊的，同時把 _ssl 的 @rpath 指過去。於是 .app 一 import 任何
+# 走 TLS 的東西就死在：
+#
+#     Symbol not found: _X509_STORE_get1_objects
+#
+# 那個符號是 OpenSSL 3.2 才加的，3.0.8 沒有。方向錯了才會壞：OpenSSL 3.x
+# 系列 ABI 相容，pysolace 對著 3.6.3 跑沒問題，反過來就不行。所以這裡把
+# 每一份同名的 libcrypto/libssl 都換成 _ssl 當初編譯時對著的那一份。
+#
+# 2026-08-04 macOS 實機建置踩到。症狀會誤導：最先爆出來的是
+# `could not import pywebview`，因為 webview 進來的路上會碰到 ssl。
+_openssl = _openssl_that_ssl_was_built_against()
+if _openssl:
+    a.binaries = [
+        (dest, _openssl.get(os.path.basename(dest), src), kind)
+        for dest, src, kind in a.binaries
+    ]
+
 pyz = PYZ(a.pure)
 
 exe = EXE(

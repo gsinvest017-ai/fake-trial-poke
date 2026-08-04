@@ -256,8 +256,13 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         import webview
-    except ImportError:
-        LOG.error("pywebview is missing from this build")
+    except ImportError as exc:
+        # Report what actually failed, not a guess. On the first real macOS
+        # build `webview` itself was bundled correctly and the missing piece
+        # was its dependency `bottle` -- and "pywebview is missing from this
+        # build" sent the search in exactly the wrong direction. The import
+        # error already names the culprit; print it.
+        LOG.error("could not import pywebview: %s", exc)
         return 1
 
     webview.create_window(
