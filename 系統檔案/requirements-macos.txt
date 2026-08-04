@@ -1,0 +1,25 @@
+# macOS 打包 release 版時，除了 requirements.txt 之外還必須裝的東西。
+# 原始碼模式不需要（服務跑在瀏覽器裡）；只有要產 .app 才需要。
+-r requirements.txt
+
+# 授權拒絕畫面的載體。keyguard 的 refuse_in_window() 是延遲 import
+# pywebview 的：裝了就用應用自己的視窗，沒裝就靜靜退回 tkinter。
+# 這個測試的判準正是「視窗有沒有出現」，所以它不是選配。
+pywebview==5.4
+
+# pywebview 在 macOS 上走 Cocoa/WebKit，需要這三個 pyobjc 套件；
+# 少了它們 `import webview` 會過，但 create_window 會在執行期爆掉，
+# 而那個失敗會被 refuse_in_window() 吞掉並降級成 tkinter。
+pyobjc-core>=10.3
+pyobjc-framework-Cocoa>=10.3
+pyobjc-framework-WebKit>=10.3
+
+# PyInstaller 本體。
+pyinstaller>=6.6
+
+# 注意 tkinter：它是標準函式庫但不是 pip 套件。keyguard 的最終備援視窗
+# 靠它，缺了的話 AppGate.refusal_ui() 在非 Windows 會回 "text"——拒絕
+# 只印到 stderr，GUI 模式下等於完全看不見。
+#   python.org 的安裝檔：內建，不用處理。
+#   Homebrew：另外裝 `brew install python-tk@3.12`。
+# 驗證：python -c "import tkinter" 要能過。
