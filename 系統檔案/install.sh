@@ -65,7 +65,7 @@ else
         rm -rf "$VENV_DIR"
     fi
     echo "[1/5] 建立資料夾內的 .venv ..."
-    "$PYTHON312" -m venv "$VENV_DIR" || fail "無法建立 .venv（偵測到的 Python 是 $PYTHON312）。"
+    "$PYTHON312" -m venv "$VENV_DIR" || fail "無法建立 .venv（偵測到的 Python 是 ${PYTHON312}）。"
 fi
 
 echo "[2/5] 升級 pip ..."

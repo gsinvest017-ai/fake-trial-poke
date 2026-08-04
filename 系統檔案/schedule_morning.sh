@@ -174,11 +174,11 @@ case "$MODE" in
         fi
         mkdir -p "$LOG_DIR"
         echo "$(date '+%F %T') 使用 Python：$python_exe"
-        echo "$(date '+%F %T') 啟動 service.py（PORT $PORT）"
+        echo "$(date '+%F %T') 啟動 service.py（PORT ${PORT}）"
         exec "$python_exe" "$SERVICE" --host "$HOST" --port "$PORT"
         ;;
     *)
-        echo "unknown mode: $MODE（可用：register/status/unregister/execute）" >&2
+        echo "unknown mode: ${MODE}（可用：register/status/unregister/execute）" >&2
         exit 2
         ;;
 esac

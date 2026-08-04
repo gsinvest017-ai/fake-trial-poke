@@ -105,6 +105,65 @@ class SchedulerInstanceLockTests(unittest.TestCase):
         scheduler.release_instance_lock(scheduler.acquire_instance_lock())
 
 
+class ShellMessageExpansionTests(unittest.TestCase):
+    """`$VAR` 後面不能緊接中文字——那會被 bash 3.2 吃進變數名。
+
+    macOS 只內建 bash 3.2，而本專案的 shell 腳本都是 `#!/usr/bin/env bash`。
+    bash 3.2 在多位元組 locale 下用 locale 的 isalpha() 判斷識別字，於是
+    `"（PORT $PORT）"` 裡的全形括號會被當成 $PORT 名稱的一部分，配上
+    `set -u` 就變成：
+
+        line 181: MODE?: unbound variable
+
+    使用者本來該看到的那句中文診斷不見了，退出碼也從 2 變成 1。詭異的是
+    C locale 反而正常，所以 launchd 跑得過、使用者在 Terminal 手動跑就壞
+    ——最容易漏掉的組合。2026-08-04 於 macOS 實機確認。
+
+    修法一律是加大括號：`${PORT}`。
+    """
+
+    SHELL_SUFFIXES = {".sh", ".command"}
+    #: $NAME 後面緊跟著非 ASCII 字元。
+    PATTERN = re.compile(r"\$[A-Za-z_][A-Za-z0-9_]*(?=[^\x00-\x7f])")
+
+    def _shell_scripts(self) -> list[pathlib.Path]:
+        repo = PACKAGE_DIR.parent
+        return sorted(
+            path
+            for path in repo.rglob("*")
+            if path.suffix in self.SHELL_SUFFIXES
+            and ".git" not in path.parts
+            and ".venv" not in path.parts
+        )
+
+    def test_no_unbraced_variable_before_a_wide_character(self) -> None:
+        scripts = self._shell_scripts()
+        self.assertTrue(scripts, "沒有掃到任何 shell 腳本，測試本身失效了")
+
+        offenders: list[str] = []
+        for path in scripts:
+            for number, line in enumerate(
+                path.read_text(encoding="utf-8").splitlines(), 1
+            ):
+                if line.lstrip().startswith("#"):
+                    continue  # 註解不會展開
+                for match in self.PATTERN.finditer(line):
+                    # 單引號內是字面值，不展開（有一行是刻意印出變數名）。
+                    if line.count("'", 0, match.start()) % 2:
+                        continue
+                    offenders.append(
+                        f"{path.relative_to(PACKAGE_DIR.parent)}:{number}: "
+                        f"{match.group()} → 請改成 ${{{match.group()[1:]}}}"
+                    )
+
+        self.assertEqual(
+            offenders,
+            [],
+            "以下位置的變數後面緊接中文字，bash 3.2 在 UTF-8 locale 下會把中文"
+            "吃進變數名：\n  " + "\n  ".join(offenders),
+        )
+
+
 @unittest.skipUnless(sys.platform == "darwin", "schedule_morning.sh 只在 macOS 上有載體")
 class ScheduleMorningPythonResolutionTests(unittest.TestCase):
     """排程挑錯直譯器時，失敗是靜默的——08:25 沒有人在看畫面。
