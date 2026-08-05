@@ -196,10 +196,20 @@ refuse_in_window = GATE.refuse_in_window
 #: Baked in rather than configured on the customer's machine -- a URL somebody
 #: can point elsewhere is a URL that can be pointed at nothing. The environment
 #: variable stays for testing and for customers behind a mirror.
+#: A release asset, not a branch path. Two reasons, both operational:
+#:
+#: Publishing a withdrawal used to mean pushing to `master`, so every
+#: revocation needed a pull request -- branch protection exists to guard code
+#: review, and having it stand between a vendor and cutting off access was an
+#: accident of where the files happened to live. `gh release upload --clobber`
+#: touches no branch.
+#:
+#: And raw.githubusercontent serves `Cache-Control: max-age=300`, so a
+#: withdrawal took minutes to propagate. Release downloads are `no-cache`.
 STATUS_URL = os.environ.get(
     "FAKE_TRIAL_POKE_LICENCE_URL",
-    "https://raw.githubusercontent.com/gsinvest017-ai/fake-trial-poke/master"
-    "/licence-status/{app}/{email_sha256}.txt",
+    "https://github.com/gsinvest017-ai/fake-trial-poke/releases/download"
+    "/licence-status/{app}-{email_sha256}.txt",
 ).strip()
 
 refresh_licence = GATE.refresh_licence
