@@ -117,7 +117,16 @@ record PASS "授權池已標記為過期"
 
 # ── 3. 啟動並斷言 ─────────────────────────────────────────────────────
 echo "[3/4] 啟動應用，等待拒絕視窗 ..."
+# 狀態來源指向不存在的位置。這個測試偽造的是「本機授權過期」，而應用程式
+# 現在會從廠商發布的狀態自我修復——它會抓到那張仍然有效的簽章金鑰、裝回去、
+# 正常啟動，於是底下每一條斷言量到的都是一個「有授權的應用程式」。
+#
+# 第一次遇到時，閘門回報的是「服務在鎖屏後面跑起來了」——一個真實而且駭人的
+# 失敗訊息，但那包其實完全正常。會喊狼來了的閘門，最後會被關掉。
+#
+# 要測的情境是：本機授權到期，而且沒有任何廠商聲明說它還有效。
 env APPDATA="$SCRATCH" "$EMAIL_ENV=$EMAIL" \
+    "${APP_ID}_LICENCE_URL=http://127.0.0.1:1/no-such-status" \
     "$EXE" >"$SCRATCH/run.log" 2>&1 &
 APP_PID=$!
 
@@ -158,8 +167,16 @@ else
 fi
 
 echo "[4/4] 截圖 → $SHOT"
-screencapture -x "$SHOT" 2>/dev/null && record PASS "已存證 $SHOT" \
-    || echo "  [WARN] 截圖失敗（需要「螢幕錄製」權限）。"
+# 先試 broker。`screencapture` 從 ssh 呼叫需要「螢幕錄製」權限，而 macOS 不會
+# 授予 sshd，也沒有辦法在無人在場時授予——所以這一步在無人看管的執行裡永遠是
+# WARN。broker 常駐在 GUI session 且已經持有那個權限，它存在的理由就是這個。
+if command -v gsagent >/dev/null 2>&1 && gsagent screenshot "$SHOT" >/dev/null 2>&1; then
+    record PASS "已存證 $SHOT（經 broker）"
+elif screencapture -x "$SHOT" 2>/dev/null; then
+    record PASS "已存證 $SHOT"
+else
+    echo "  [WARN] 截圖失敗（需要「螢幕錄製」權限，或安裝 gsagent broker）。"
+fi
 
 # ── 收尾：關掉視窗，確認非零退出 ─────────────────────────────────────
 if kill -0 "$APP_PID" 2>/dev/null; then

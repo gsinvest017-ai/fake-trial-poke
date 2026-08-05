@@ -271,12 +271,21 @@ gate_or_die "Gatekeeper 閘門未通過"
 # ── Gate 2：keyguard 真的被凍結進去了 ─────────────────────────────────
 step "Gate 2 — keyguard 已凍結進 .app"
 
-# 先跑 keyguard 自己的 packagecheck。它在非 Windows 會把視窗那部分回報成
-# SKIP，所以底下還有一條行為檢查——SKIP 不能當成 PASS，那正是這整支腳本
-# 存在的理由。
-if "$VENV_PYTHON" -m keyguard.packagecheck "$APP_BUNDLE" \
-        --email-env "$EMAIL_ENV" --require-console-output 2>&1 | tee /dev/stderr \
-        | grep -qi "skip"; then
+# 先跑 keyguard 自己的 packagecheck，**判斷它的退出碼**。
+#
+# 這裡原本是 `... | grep -qi skip` —— 用輸出內容決定成敗，於是印著
+# "6 check(s) failed - DO NOT SHIP this build." 的一次執行被回報成「通過」。
+# 那是 Windows 產線踩過三次的同一類 false pass：拿閘門的碎念當它的結論。
+#
+# 指向 .app 裡的執行檔而不是 .app 目錄本身：目錄不能 exec，每一項行為探測都會
+# 得到 Permission denied，而失敗的原因與這包做得好不好毫無關係。
+packagecheck_out="$("$VENV_PYTHON" -m keyguard.packagecheck "$APP_EXE" \
+    --email-env "$EMAIL_ENV" --require-console-output 2>&1)" && rc=0 || rc=$?
+printf '%s\n' "$packagecheck_out"
+if [[ $rc -ne 0 ]]; then
+    fail "keyguard.packagecheck 未通過（退出碼 $rc）"
+elif printf '%s' "$packagecheck_out" | grep -qi "^SKIP"; then
+    # SKIP 不能當成 PASS——那正是這整支腳本存在的理由——但也不是失敗。
     waive "packagecheck 有 SKIP 項目（非 Windows）；改由下方行為檢查認定"
 else
     pass "keyguard.packagecheck 通過"
